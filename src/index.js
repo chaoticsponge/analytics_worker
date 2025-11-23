@@ -1,0 +1,151 @@
+const ALLOWED_ORIGINS = new Set(['YOUR DOMAIN HERE', 'http://127.0.0.1:5500', 'http://localhost:5500']);
+
+function getCorsHeaders(origin) {
+	if (origin && ALLOWED_ORIGINS.has(origin)) {
+		return {
+			'Access-Control-Allow-Origin': origin,
+			'Access-Control-Allow-Methods': 'POST, OPTIONS',
+			'Access-Control-Allow-Headers': 'Content-Type',
+			'Access-Control-Allow-Credentials': 'true',
+			'Access-Control-Max-Age': '86400',
+			Vary: 'Origin',
+		};
+	}
+	return {};
+}
+
+function toIntOrNull(val) {
+	if (val === null || val === undefined || val === '') return null;
+	const n = Number(val);
+	return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+async function insertAnalyticsEvent(env, req, body) {
+	const now = Date.now();
+
+	const cf = req.cf || {};
+	const headers = req.headers;
+
+	const ip = headers.get('cf-connecting-ip') || (headers.get('x-forwarded-for') || '').split(',')[0].trim() || null;
+
+	const country = cf.country || null;
+	const city = cf.city || null;
+	const colo = cf.colo || null;
+
+	// Body from analytics.js
+	const type = body.type || 'page_view';
+	const path = body.path || null;
+	const full_url = body.full_url || null;
+	const referrer = body.referrer || null;
+	const user_agent = body.user_agent || headers.get('User-Agent') || null;
+	const session_id = body.session_id || null;
+	const duration_ms = toIntOrNull(body.duration_ms);
+	const scroll_pct = toIntOrNull(body.scroll_pct);
+
+	// UTM: support both nested `utm` and flattened fields
+	const utm = body.utm || {};
+	const utm_source = body.utm_source || utm.utm_source || null;
+	const utm_medium = body.utm_medium || utm.utm_medium || null;
+	const utm_campaign = body.utm_campaign || utm.utm_campaign || null;
+	const utm_term = body.utm_term || utm.utm_term || null;
+	const utm_content = body.utm_content || utm.utm_content || null;
+
+	// Device: support nested `device` and flattened fields
+	const device = body.device || {};
+	const device_type = body.device_type || device.device_type || device.type || null;
+	const device_os = body.device_os || device.device_os || device.os || null;
+	const device_browser = body.device_browser || device.device_browser || device.browser || null;
+
+	// Log once so you can see exactly what the Worker receives
+	console.log('analytics payload', JSON.stringify(body));
+
+	try {
+		await env.DB.prepare(
+			`INSERT INTO analytics (
+        ts,
+        type,
+        path,
+        full_url,
+        referrer,
+        user_agent,
+        duration_ms,
+        scroll_pct,
+        session_id,
+        utm_source,
+        utm_medium,
+        utm_campaign,
+        utm_term,
+        utm_content,
+        device_type,
+        device_os,
+        device_browser,
+        ip,
+        country,
+        city,
+        colo
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		)
+			.bind(
+				now, // ts
+				type,
+				path,
+				full_url,
+				referrer,
+				user_agent,
+				duration_ms,
+				scroll_pct,
+				session_id,
+				utm_source,
+				utm_medium,
+				utm_campaign,
+				utm_term,
+				utm_content,
+				device_type,
+				device_os,
+				device_browser,
+				ip,
+				country,
+				city,
+				colo,
+			)
+			.run();
+	} catch (err) {
+		console.error('D1 insert failed:', err);
+	}
+}
+
+export default {
+	async fetch(request, env, ctx) {
+		const url = new URL(request.url);
+		const origin = request.headers.get('Origin') || '';
+		const corsHeaders = getCorsHeaders(origin);
+
+		// CORS preflight
+		if (request.method === 'OPTIONS' && url.pathname === '/analytics') {
+			return new Response(null, {
+				status: 204,
+				headers: corsHeaders,
+			});
+		}
+
+		// Analytics endpoint
+		if (request.method === 'POST' && url.pathname === '/analytics') {
+			let body = {};
+			try {
+				body = await request.json(); // parse BEFORE responding
+			} catch (e) {
+				console.error('Failed to parse JSON body', e);
+				body = {};
+			}
+
+			ctx.waitUntil(insertAnalyticsEvent(env, request, body));
+
+			return new Response(null, {
+				status: 204,
+				headers: corsHeaders,
+			});
+		}
+
+		return new Response('Not found', { status: 404 });
+	},
+};
