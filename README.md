@@ -11,8 +11,8 @@ No external databases, no third-party trackers, away from googles AD network and
 ## Quick start
 
 ```bash
-git clone https://github.com/<yourname>/emstat-analytics
-cd emstat-analytics
+git clone https://github.com/<yourname>/analytics-worker
+cd analytics-worker
 
 npm install -g wrangler
 wrangler login
