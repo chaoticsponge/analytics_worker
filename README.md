@@ -11,7 +11,7 @@ No external databases, no third-party trackers, away from googles AD network and
 ## Quick start
 
 ```bash
-git clone https://github.com/chaoticsponge/analytics-worker
+git clone https://github.com/chaoticsponge/analytics_worker
 cd analytics-worker
 
 npm install -g wrangler
