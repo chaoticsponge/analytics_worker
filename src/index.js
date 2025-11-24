@@ -4,17 +4,15 @@ var __name = (target, value) => __defProp(target, 'name', { value, configurable:
 // src/index.js
 var ALLOWED_ORIGINS = /* @__PURE__ */ new Set(['https://emmr.me']);
 function getCorsHeaders(origin) {
-	if (origin && ALLOWED_ORIGINS.has(origin)) {
-		return {
-			'Access-Control-Allow-Origin': origin,
-			'Access-Control-Allow-Methods': 'POST, OPTIONS',
-			'Access-Control-Allow-Headers': 'Content-Type',
-			'Access-Control-Allow-Credentials': 'true',
-			'Access-Control-Max-Age': '86400',
-			Vary: 'Origin',
-		};
-	}
-	return {};
+	if (!origin || !ALLOWED_ORIGINS.has(origin)) return {};
+	return {
+		'Access-Control-Allow-Origin': origin,
+		'Access-Control-Allow-Methods': 'POST, OPTIONS',
+		'Access-Control-Allow-Headers': 'Content-Type',
+		'Access-Control-Allow-Credentials': 'true',
+		'Access-Control-Max-Age': '86400',
+		Vary: 'Origin',
+	};
 }
 __name(getCorsHeaders, 'getCorsHeaders');
 function toIntOrNull(val) {
@@ -50,60 +48,58 @@ async function insertAnalyticsEvent(env, req, body) {
 	const device_os = body.device_os || device.device_os || device.os || null;
 	const device_browser = body.device_browser || device.device_browser || device.browser || null;
 	console.log('analytics payload', JSON.stringify(body));
-	try {
-		await env.DB.prepare(
-			`INSERT INTO analytics (
-        ts,
-        type,
-        path,
-        full_url,
-        referrer,
-        user_agent,
-        duration_ms,
-        scroll_pct,
-        session_id,
-        utm_source,
-        utm_medium,
-        utm_campaign,
-        utm_term,
-        utm_content,
-        device_type,
-        device_os,
-        device_browser,
-        ip,
-        country,
-        city,
-        colo
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	const stmt = env.DB.prepare(
+		`INSERT INTO analytics (
+      ts,
+      type,
+      path,
+      full_url,
+      referrer,
+      user_agent,
+      duration_ms,
+      scroll_pct,
+      session_id,
+      utm_source,
+      utm_medium,
+      utm_campaign,
+      utm_term,
+      utm_content,
+      device_type,
+      device_os,
+      device_browser,
+      ip,
+      country,
+      city,
+      colo
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	);
+	const result = await stmt
+		.bind(
+			now,
+			type,
+			path,
+			full_url,
+			referrer,
+			user_agent,
+			duration_ms,
+			scroll_pct,
+			session_id,
+			utm_source,
+			utm_medium,
+			utm_campaign,
+			utm_term,
+			utm_content,
+			device_type,
+			device_os,
+			device_browser,
+			ip,
+			country,
+			city,
+			colo,
 		)
-			.bind(
-				now,
-				// ts
-				type,
-				path,
-				full_url,
-				referrer,
-				user_agent,
-				duration_ms,
-				scroll_pct,
-				session_id,
-				utm_source,
-				utm_medium,
-				utm_campaign,
-				utm_term,
-				utm_content,
-				device_type,
-				device_os,
-				device_browser,
-				ip,
-				country,
-				city,
-				colo,
-			)
-			.run();
-	} catch (err) {
-		console.error('D1 insert failed:', err);
-	}
+		.run();
+	console.log('D1 insert result:', result);
+	return result;
 }
 __name(insertAnalyticsEvent, 'insertAnalyticsEvent');
 var index_default = {
@@ -111,13 +107,23 @@ var index_default = {
 		const url = new URL(request.url);
 		const origin = request.headers.get('Origin') || '';
 		const corsHeaders = getCorsHeaders(origin);
+		if (url.pathname === '/analytics' && (!origin || !ALLOWED_ORIGINS.has(origin))) {
+			return new Response('Forbidden origin', { status: 403 });
+		}
 		if (request.method === 'OPTIONS' && url.pathname === '/analytics') {
-			return new Response(null, {
-				status: 204,
-				headers: corsHeaders,
-			});
+			return new Response(null, { status: 204, headers: corsHeaders });
 		}
 		if (request.method === 'POST' && url.pathname === '/analytics') {
+			const postOrigin = request.headers.get('Origin') || '';
+			const isLocal =
+				postOrigin.startsWith('http://localhost') ||
+				postOrigin.startsWith('http://127.0.0.1') ||
+				postOrigin.startsWith('file://') ||
+				postOrigin === '';
+			if (isLocal) {
+				console.log('Skipping local analytics:', postOrigin);
+				return new Response(null, { status: 204, headers: corsHeaders });
+			}
 			let body = {};
 			try {
 				body = await request.json();
@@ -125,10 +131,13 @@ var index_default = {
 				console.error('Failed to parse JSON body', e);
 				body = {};
 			}
-			ctx.waitUntil(insertAnalyticsEvent(env, request, body));
-			return new Response(null, {
-				status: 204,
-				headers: corsHeaders,
+			const result = await insertAnalyticsEvent(env, request, body);
+			return new Response(JSON.stringify(result), {
+				status: 200,
+				headers: {
+					...corsHeaders,
+					'Content-Type': 'application/json',
+				},
 			});
 		}
 		return new Response('Not found', { status: 404 });

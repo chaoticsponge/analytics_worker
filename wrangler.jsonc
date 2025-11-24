@@ -14,7 +14,7 @@
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "analytics",
+			"database_name": "emstat",
 			"database_id": "1ec83e13-43f6-484e-9fa5-f1534da21a6a",
 		},
 	],
