@@ -4,18 +4,18 @@
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "your-analytics-worker",
+	"name": "emstat-analytics",
 	"main": "src/index.js",
 	"compatibility_date": "2025-11-21",
 	"observability": {
-		"enabled": true,
+		"enabled": false,
 	},
 	// Bindings
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "YOUR_D1_DATABASE_NAME",
-			"database_id": "YOUR_D1_DATABASE_ID",
+			"database_name": "analytics",
+			"database_id": "1ec83e13-43f6-484e-9fa5-f1534da21a6a",
 		},
 	],
 }
