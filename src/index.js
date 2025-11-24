@@ -33,6 +33,10 @@ async function insertAnalyticsEvent(env, req, body) {
 	const path = body.path || null;
 	const full_url = body.full_url || null;
 	const referrer = body.referrer || null;
+	if (full_url && (full_url.startsWith('http://localhost') || full_url.startsWith('http://127.0.0.1') || full_url.startsWith('file://'))) {
+		console.log('Skipping local/dev analytics for URL:', full_url);
+		return { skipped: true };
+	}
 	const user_agent = body.user_agent || headers.get('User-Agent') || null;
 	const session_id = body.session_id || null;
 	const duration_ms = toIntOrNull(body.duration_ms);
@@ -71,7 +75,7 @@ async function insertAnalyticsEvent(env, req, body) {
       country,
       city,
       colo
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	);
 	const result = await stmt
 		.bind(
@@ -107,12 +111,19 @@ var index_default = {
 		const url = new URL(request.url);
 		const origin = request.headers.get('Origin') || '';
 		const corsHeaders = getCorsHeaders(origin);
-		if (url.pathname === '/analytics' && (!origin || !ALLOWED_ORIGINS.has(origin))) {
+
+		// Only block explicit foreign origins.
+		const isExplicitForeignOrigin = origin && origin !== 'null' && !ALLOWED_ORIGINS.has(origin);
+
+		if (url.pathname === '/analytics' && isExplicitForeignOrigin) {
+			console.log('Forbidden origin:', origin);
 			return new Response('Forbidden origin', { status: 403 });
 		}
+
 		if (request.method === 'OPTIONS' && url.pathname === '/analytics') {
 			return new Response(null, { status: 204, headers: corsHeaders });
 		}
+
 		if (request.method === 'POST' && url.pathname === '/analytics') {
 			const postOrigin = request.headers.get('Origin') || '';
 			const isLocal =
@@ -120,10 +131,12 @@ var index_default = {
 				postOrigin.startsWith('http://127.0.0.1') ||
 				postOrigin.startsWith('file://') ||
 				postOrigin === '';
+
 			if (isLocal) {
 				console.log('Skipping local analytics:', postOrigin);
 				return new Response(null, { status: 204, headers: corsHeaders });
 			}
+
 			let body = {};
 			try {
 				body = await request.json();
@@ -131,7 +144,9 @@ var index_default = {
 				console.error('Failed to parse JSON body', e);
 				body = {};
 			}
+
 			const result = await insertAnalyticsEvent(env, request, body);
+
 			return new Response(JSON.stringify(result), {
 				status: 200,
 				headers: {
@@ -140,8 +155,9 @@ var index_default = {
 				},
 			});
 		}
+
 		return new Response('Not found', { status: 404 });
 	},
 };
+
 export { index_default as default };
-//# sourceMappingURL=index.js.map
