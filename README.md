@@ -8,6 +8,14 @@ Simple, privacy-friendly website analytics built entirely on Cloudflare:
 
 No external databases, no third-party trackers, away from googles AD network and completely free for small use-cases like my hobby site.
 
+## Analytics.py
+
+It's a script for once you create different views in your D1 db to pull analytics easily on device. Works locally with wrangler logged in.
+
+```bash
+pip3 install plotext
+```
+
 ## Quick start
 
 ```bash
