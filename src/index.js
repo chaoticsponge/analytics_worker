@@ -125,18 +125,6 @@ var index_default = {
 		}
 
 		if (request.method === 'POST' && url.pathname === '/analytics') {
-			const postOrigin = request.headers.get('Origin') || '';
-			const isLocal =
-				postOrigin.startsWith('http://localhost') ||
-				postOrigin.startsWith('http://127.0.0.1') ||
-				postOrigin.startsWith('file://') ||
-				postOrigin === '';
-
-			if (isLocal) {
-				console.log('Skipping local analytics:', postOrigin);
-				return new Response(null, { status: 204, headers: corsHeaders });
-			}
-
 			let body = {};
 			try {
 				body = await request.json();

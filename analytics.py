@@ -181,6 +181,16 @@ def plot_monthly_pageviews(monthly_rows):
 
 
 
+def strip_query_from_paths(rows, key="path"):
+    """
+    Remove query strings from path-like fields so UTM/fbclid params
+    don't clutter the dashboard output.
+    """
+    for row in rows or []:
+        val = row.get(key)
+        if isinstance(val, str) and "?" in val:
+            row[key] = val.split("?", 1)[0]
+
 
 def main():
     # Views based on the SQL views you created in D1
@@ -193,6 +203,17 @@ def main():
     v_countries = run_sql(
         "SELECT country, hits "
         "FROM v_top_countries "
+        "ORDER BY hits DESC "
+        "LIMIT 20;"
+    )
+    v_referrers = run_sql(
+        "SELECT "
+        "  COALESCE(referrer, '(none)') AS referrer, "
+        "  COUNT(*) AS hits "
+        "FROM analytics "
+        "WHERE referrer IS NOT NULL "
+        "  AND referrer NOT LIKE '%emmr.me%' "  # skip self-referrals
+        "GROUP BY referrer "
         "ORDER BY hits DESC "
         "LIMIT 20;"
     )
@@ -221,6 +242,9 @@ def main():
     )
 
     # KPIs
+    strip_query_from_paths(v_posts, "path")
+    strip_query_from_paths(v_google, "path")
+
     total_30_days = sum(int(r.get("views", 0) or 0) for r in v_days)
     unique_countries = len(v_countries)
     total_google = sum(int(r.get("google_clicks", 0) or 0) for r in v_google)
@@ -253,6 +277,12 @@ def main():
         "Top Countries",
         v_countries,
         ["country", "hits"],
+    )
+
+    print_table(
+        "Top Referrers",
+        v_referrers,
+        ["referrer", "hits"],
     )
 
     print_table(
@@ -290,4 +320,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

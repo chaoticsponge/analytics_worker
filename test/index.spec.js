@@ -1,20 +1,34 @@
-import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
+import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 import worker from '../src';
 
-describe('Hello World worker', () => {
-	it('responds with Hello World! (unit style)', async () => {
-		const request = new Request('http://example.com');
-		// Create an empty context to pass to `worker.fetch()`.
+describe('Analytics worker', () => {
+	it('returns 404 for unknown routes', async () => {
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
-		// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
+		const response = await worker.fetch(new Request('http://example.com/'), env, ctx);
 		await waitOnExecutionContext(ctx);
-		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+		expect(response.status).toBe(404);
 	});
 
-	it('responds with Hello World! (integration style)', async () => {
-		const response = await SELF.fetch('http://example.com');
-		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+	it('handles CORS preflight on /analytics', async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(new Request('http://example.com/analytics', { method: 'OPTIONS' }), env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(204);
+	});
+
+	it('blocks non-allowed origins for analytics posts', async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new Request('http://example.com/analytics', {
+				method: 'POST',
+				headers: { Origin: 'http://localhost' },
+				body: JSON.stringify({ type: 'page_view', path: '/', full_url: 'http://localhost/' }),
+			}),
+			env,
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(403);
 	});
 });

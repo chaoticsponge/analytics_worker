@@ -6,7 +6,7 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "emstat-analytics",
 	"main": "src/index.js",
-	"compatibility_date": "2025-11-21",
+	"compatibility_date": "2025-09-06",
 	"observability": {
 		"enabled": false,
 	},
