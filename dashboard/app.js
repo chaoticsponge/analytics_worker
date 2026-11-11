@@ -64,6 +64,8 @@ function renderTrend() {
 }
 function renderInsights(current, previous) {
   const insights = [];
+  const security = data.security_summary[0];
+  if (security?.events) insights.push(['SECURITY / REVIEW NOW', 'Investigate suspicious path requests', `${number(security.events)} recorded events target sensitive or commonly probed paths, even with small samples.`, 'Review the security alerts, origin response status, and WAF logs. Confirm secrets and configuration files are inaccessible.']);
   if (current.views && previous.views) {
     const change = (current.views - previous.views) / previous.views * 100;
     insights.push(['TRAFFIC / PERIOD COMPARISON',`Traffic is ${Math.abs(change).toFixed(0)}% ${change >= 0 ? 'higher' : 'lower'}`,`${number(current.views)} views vs. ${number(previous.views)} in the preceding equal-length window. Today is partial; collection coverage is unverified.`, change >= 0 ? 'Check leading pages and sources to understand the increase before repeating a campaign.' : 'Check acquisition changes and collection health before changing your content strategy.']);
@@ -76,21 +78,31 @@ function renderInsights(current, previous) {
     const device = data.devices.find(d => d.label !== '(unknown)');
     if (device) insights.push(['EXPERIENCE / PRIORITIZE',`Start with ${device.label}`, `${percent(device.views/current.views*100)} of recorded views use this device type.`, 'Test navigation, readability, and key actions on this device first.']);
   }
-  insights.push(['MEASUREMENT / NEXT STEP',current.views ? 'Connect attention to outcomes' : 'Establish your measurement baseline',current.views ? 'Pageviews and reading signals show interest. No named conversion goals are present in the current collection schema.' : 'No pageviews were recorded in this window. This may reflect no traffic, or a collection issue.',current.views ? 'Define one meaningful goal and record its completion with the originating page and campaign.' : 'Check the tracker endpoint, allowed origin, and database before interpreting this as zero traffic.']);
+  insights.push(['MEASUREMENT / NEXT STEP',current.views ? 'Connect attention to outcomes' : 'Establish your measurement baseline',current.views ? 'Pageviews and reading signals show interest. No named conversion goals are present in the current collection schema.' : 'No audience pageviews remain in this window after filtering. Review excluded traffic and collection health.',current.views ? 'Define one meaningful goal and record its completion with the originating page and campaign.' : 'Check the tracker endpoint, allowed origin, and database before interpreting this as zero traffic.']);
   if (insights.length < 3) insights.push(['CONFIDENCE / SAMPLE SIZE','Let the evidence build','Page signals require at least 20 views and 20 paired time/scroll measurements. These are review heuristics, not statistical tests.','Use a wider date range and inspect measurement coverage before prioritizing individual pages.']);
   $('insights').innerHTML = insights.slice(0,3).map(([tag,title,evidence,action]) => `<article class="insight"><span class="priority">${tag}</span><h3>${escape(title)}</h3><p>${escape(evidence)}</p><p class="action">↗ ${escape(action)}</p></article>`).join('');
+}
+function renderSecurity() {
+  const security = data.security_summary[0] || {events:0, paths:0};
+  const quality = data.traffic_quality[0] || {};
+  $('security-status').textContent = security.events ? `${number(security.events)} flagged events` : 'No matching recorded probes';
+  $('security-status').className = `badge ${security.events ? 'danger' : 'neutral'}`;
+  $('security-alert').hidden = !security.events;
+  $('security-alert').textContent = `${number(security.events)} possible probe events across ${number(security.paths)} paths. Review even a single hit. Verify whether these files exist and whether any response exposed data.`;
+  $('traffic-filter').textContent = `Audience metrics exclude ${number(quality.suspicious)} suspicious pageviews and ${number(quality.crawlers)} other crawler-claimed pageviews from ${number(quality.recorded)} recorded pageviews. ${number(quality.unknown_agent)} remaining pageviews have no user agent; these are not verified human visits.`;
+  $('security-rows').innerHTML = data.alerts.length ? data.alerts.map(row => `<tr><td>${escape(row.path)}</td><td><span class="badge danger">${escape(row.reason)}</span></td><td>${number(row.events)}</td><td>${escape(new Date(row.last_seen).toISOString().replace('T', ' ').slice(0,19))}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">No configured suspicious-path rules matched recorded events in this period. This does not verify site security.</td></tr>';
 }
 function render() {
   const current = data.summary.find(s => s.period === 'current') || {views:0,browsers:0,countries:0};
   const previous = data.summary.find(s => s.period === 'previous') || {};
-  const kpis = [['Recorded pageviews','views',number,'All recorded page_view events'],['Recognized browsers','browsers',number,'Distinct stored IDs; not visits or people'],['Average time on page','duration',seconds,'Elapsed time; includes background time'],['Average scroll depth','scroll',percent,'Mean maximum depth; not completion rate']];
+  const kpis = [['Audience pageviews','views',number,'Known crawler claims and suspicious paths excluded'],['Recognized browsers','browsers',number,'Distinct stored IDs; not visits or people'],['Average time on page','duration',seconds,'Elapsed time; includes background time'],['Average scroll depth','scroll',percent,'Mean maximum depth; not completion rate']];
   $('kpis').innerHTML = kpis.map(([label,key,format,note]) => {
     const before = previous[key], value = current[key];
     const change = before > 0 && value != null ? (value-before)/before*100 : null;
     return `<article class="kpi"><div class="kpi-label">${label}</div><div class="kpi-value">${format(value)}</div><div class="kpi-foot">${change == null ? 'No comparison baseline' : `<span class="delta ${change < 0 ? 'down' : ''}">${change >= 0 ? '↗' : '↘'} ${Math.abs(change).toFixed(1)}%</span> vs. previous window`}</div><div class="kpi-foot">${note}</div></article>`;
   }).join('');
   $('kpis').setAttribute('aria-busy','false');
-  renderTrend(); renderPages(); renderInsights(current,previous);
+  renderSecurity(); renderTrend(); renderPages(); renderInsights(current,previous);
   const sources = new Map();
   data.sources.forEach(row => {
     let label = row.label;
@@ -103,7 +115,7 @@ function render() {
   renderBars('campaigns',data.campaigns,current.views);
   $('coverage').innerHTML = [['Time coverage','duration_samples'],['Scroll coverage','scroll_samples'],['Browser ID coverage','identified'],['UTM-tagged views','tagged']].map(([label,key])=>`<div><strong>${current.views ? percent((current[key] || 0)/current.views*100) : '—'}</strong>${label}</div>`).join('');
   const observations = [];
-  if (!current.views) observations.push('No recorded pageviews: verify collection before interpreting this period.');
+  if (!current.views) observations.push('No audience pageviews remain after filtering: review excluded traffic and verify collection before interpreting this period.');
   else {
     if (!current.tagged) observations.push('No UTM-tagged views: use utm_source, utm_medium, and utm_campaign on promotional links to distinguish campaigns.');
     if (data.devices.length === 1) observations.push(`Only one device category is recorded (${data.devices[0].label}). Confirm tracker detection and mobile collection before assuming this reflects your audience.`);

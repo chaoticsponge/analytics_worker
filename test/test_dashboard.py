@@ -56,6 +56,63 @@ class QueryTests(unittest.TestCase):
         for sql in analytics.queries(30,self.now).values():
             self.assertEqual(list(self.db.execute(sql)),[])
 
+    def add_event(self, path, agent='Mozilla/5.0', kind='page_view', day=12):
+        ts = int(datetime(2026, 11, day, 2, tzinfo=timezone.utc).timestamp() * 1000)
+        self.db.execute(
+            'INSERT INTO analytics (ts,type,path,user_agent,duration_ms,scroll_pct) VALUES (?,?,?,?,?,?)',
+            (ts, kind, path, agent, 900000, 100),
+        )
+
+    def results(self):
+        return {key: [dict(row) for row in self.db.execute(sql)]
+                for key, sql in analytics.queries(7, self.now).items()}
+
+    def test_single_probes_alert_even_when_claiming_to_be_crawlers(self):
+        paths = ['/app/config/', '/.env.bak', '/.git/config', '/%2Eenv',
+                 '/%252eenv', '/APP/CONFIG/settings.json', '/foo/../etc/passwd']
+        for path in paths:
+            self.add_event(path, 'Googlebot/2.1')
+        self.add_event('/.env', kind='click')
+        result = self.results()
+        self.assertEqual({row['path'] for row in result['alerts']}, set(paths + ['/.env']))
+        self.assertTrue(all(row['events'] == 1 and row['reason'] for row in result['alerts']))
+        self.assertEqual(result['security_summary'][0]['events'], len(paths) + 1)
+        quality = result['traffic_quality'][0]
+        self.assertEqual(quality['suspicious'], len(paths))
+        self.assertEqual(quality['crawlers'], 0)  # Disjoint exclusion counts.
+        self.assertEqual(next(row for row in result['summary'] if row['period'] == 'current')['views'], 4)
+
+    def test_crawlers_are_excluded_consistently_from_every_audience_query(self):
+        baseline = self.results()
+        audience = ['summary', 'daily', 'pages', 'sources', 'countries', 'devices', 'campaigns']
+        for agent in ['Googlebot/2.1', 'Mozilla/5.0 (compatible; bingbot/2.0)',
+                      'DuckDuckBot/1.0', 'AhrefsBot/7.0', 'GPTBot/1.0']:
+            self.add_event('/indexable-page', agent)
+            self.add_event('/indexable-page', agent, day=1)
+        result = self.results()
+        for key in audience:
+            self.assertEqual(result[key], baseline[key], key)
+        self.assertEqual(result['traffic_quality'][0]['crawlers'], 5)
+        self.assertEqual(result['alerts'], [])
+
+    def test_ordinary_content_and_missing_agents_are_not_silently_filtered(self):
+        for path in ['/blog/configuration', '/blog/robots', '/.environment', '/post?next=/.env.bak']:
+            self.add_event(path)
+        self.add_event('/unknown-agent', None)
+        result = self.results()
+        self.assertEqual(result['alerts'], [])
+        self.assertEqual(result['traffic_quality'][0]['unknown_agent'], 5)
+        self.assertEqual(next(row for row in result['summary'] if row['period'] == 'current')['views'], 9)
+
+    def test_security_alerts_are_independent_of_top_page_limit(self):
+        for index in range(101):
+            self.add_event(f'/article-{index}')
+        self.add_event('/.env.bak')
+        result = self.results()
+        self.assertEqual(len(result['pages']), 100)
+        self.assertEqual(result['alerts'][0]['path'], '/.env.bak')
+        self.assertEqual(result['security_summary'][0]['events'], 1)
+
 
 class HttpTests(unittest.TestCase):
     def setUp(self):

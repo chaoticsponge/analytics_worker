@@ -49,6 +49,8 @@ zero recorded views; this does not verify that collection was working.
 - Counts include only `page_view` events. Query strings are combined before page
   aggregation. Rankings are capped: 100 pages/sources and 20 countries/campaigns;
   headline totals query the full date range. Breakdown charts show six entries.
+  Audience metrics consistently exclude recognized crawler user-agent claims and
+  suspicious paths in both current and comparison periods.
 - Recognized browsers count distinct stored `session_id` values. The sample uses
   persistent localStorage IDs; these are neither actual visits nor unique people.
 - Time is average elapsed time where nonnegative, and may include background tabs.
@@ -57,7 +59,7 @@ zero recorded views; this does not verify that collection was working.
 - Page recommendations require at least 20 views and 20 paired time/scroll
   measurements. Scroll below 40% prompts review; scroll at least 70% with at least
   30 seconds suggests engagement. These are transparent heuristics, not statistical
-  significance or proof of success. Bot filtering is not currently implemented.
+  significance or proof of success. Security alerts have no minimum sample size.
 - Sources prefer UTM source, otherwise referrer host. Direct/unknown and
   self-referrals are included. Referrers are not Search Console clicks.
 
@@ -81,8 +83,43 @@ Run dashboard checks with:
 
 ```bash
 python3 -m unittest discover -s test -p 'test_*.py' -v
+node --test test/dashboard-ui.cjs
 npm test -- --run
 ```
+
+## Suspicious paths and crawler filtering
+
+A separate **Security alerts** panel flags even one recorded event targeting
+sensitive files (such as `/.env.bak` or `/.git/config`), `/app/config/`, common
+admin/debug probes, and traversal patterns. Case and common encoded dot/slash
+variants are handled. Rules are defined in `PROBE_RULES` in `analytics.py`.
+These are possible probes, not proof of compromise; legitimate application
+routes may also match. Review origin access logs, HTTP response status, and WAF
+events to determine what happened.
+
+Security alerts query all recorded event types independently of the top-content
+limit. The panel shows the top 100 path/rule groups, with an uncapped event total.
+Suspicious paths remain visible here even when the sender claims to be Googlebot.
+They are excluded from content engagement recommendations and audience metrics.
+
+Known search, indexing, SEO, AI, and preview crawler user-agent tokens in
+`CRAWLER_TOKENS` are excluded from every audience query, including comparisons.
+Exclusion counts are visible; suspicious pageviews and other crawler pageviews
+are counted separately without double counting. Raw D1 records are retained.
+This does not block crawling or change search indexing.
+
+User-agent strings are self-reported and can be spoofed. This is heuristic
+filtering, not verified human/bot classification. Missing user agents remain in
+audience metrics with an explicit count. For stronger attribution, collect
+verified bot signals at the **website's edge**, rather than trusting the browser
+payload or the user agent of a beacon POST. See [Google's verification guidance](https://developers.google.com/search/docs/crawling-indexing/googlebot)
+and [Cloudflare bot signals](https://developers.cloudflare.com/bots/reference/bot-management-variables/).
+
+Browser analytics only sees events that reach the collector. Scanners that never
+execute JavaScript will be missing; complete security visibility needs website
+access/WAF logs with requested paths, response statuses, and mitigation actions.
+Refreshing or restarting the dashboard applies these rules to historical records;
+no schema migration or Worker redeployment is needed.
 
 ## Quick start
 

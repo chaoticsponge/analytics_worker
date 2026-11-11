@@ -14,6 +14,23 @@ import webbrowser
 
 ROOT = Path(__file__).resolve().parent
 DB_NAME = "DB"  # Wrangler D1 binding name
+CRAWLER_TOKENS = (
+    'googlebot', 'google-inspectiontool', 'adsbot-google', 'mediapartners-google',
+    'bingbot', 'bingpreview', 'duckduckbot', 'yandexbot', 'baiduspider',
+    'slurp', 'applebot', 'petalbot', 'bytespider', 'semrushbot', 'ahrefsbot',
+    'mj12bot', 'dotbot', 'gptbot', 'oai-searchbot', 'chatgpt-user', 'claudebot',
+    'perplexitybot', 'facebookexternalhit', 'twitterbot', 'linkedinbot', 'discordbot',
+)
+PROBE_RULES = {
+    'Sensitive file probe': ('*/.env', '*/.env.*', '*/.env/*', '*/.env~',
+                             '*/.git', '*/.git/*', '*/.svn/*', '*/.aws/credentials',
+                             '*/wp-config.php*', '/etc/passwd', '*/.ssh/*'),
+    'Configuration probe': ('/app/config', '/app/config/*', '/config.json',
+                            '/config.php', '/config.yml', '/config.yaml'),
+    'Traversal probe': ('*/../*', '*/..'),
+    'Admin/debug probe': ('/phpmyadmin', '/phpmyadmin/*', '/server-status',
+                          '/actuator/env', '/actuator/heapdump', '/debug/default/*'),
+}
 
 
 def queries(days, now=None):
@@ -24,15 +41,49 @@ def queries(days, now=None):
     window = f"type = 'page_view' AND ts >= {start} AND ts < {end}"
     path = "COALESCE(NULLIF(CASE WHEN instr(path, '?') > 0 THEN substr(path, 1, instr(path, '?') - 1) ELSE path END, ''), '(unknown)')"
     metrics = "COUNT(*) AS views, AVG(CASE WHEN duration_ms >= 0 THEN duration_ms / 1000.0 END) AS duration, AVG(CASE WHEN scroll_pct BETWEEN 0 AND 100 THEN scroll_pct END) AS scroll"
-    return {
-        "summary": f"SELECT CASE WHEN ts >= {start} THEN 'current' ELSE 'previous' END AS period, {metrics}, COUNT(DISTINCT NULLIF(session_id, '')) AS browsers, COUNT(DISTINCT NULLIF(country, '')) AS countries, SUM(CASE WHEN duration_ms >= 0 THEN 1 ELSE 0 END) AS duration_samples, SUM(CASE WHEN scroll_pct BETWEEN 0 AND 100 THEN 1 ELSE 0 END) AS scroll_samples, SUM(CASE WHEN NULLIF(session_id, '') IS NOT NULL THEN 1 ELSE 0 END) AS identified, SUM(CASE WHEN NULLIF(utm_source, '') IS NOT NULL THEN 1 ELSE 0 END) AS tagged FROM analytics WHERE type = 'page_view' AND ts >= {previous} AND ts < {end} GROUP BY period",
-        "daily": f"SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*) AS views FROM analytics WHERE {window} GROUP BY day ORDER BY day",
-        "pages": f"SELECT {path} AS path, {metrics}, SUM(CASE WHEN duration_ms >= 0 AND scroll_pct BETWEEN 0 AND 100 THEN 1 ELSE 0 END) AS measured FROM analytics WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 100",
-        "sources": f"SELECT COALESCE(NULLIF(utm_source, ''), NULLIF(referrer, ''), '(direct / unknown)') AS label, {metrics} FROM analytics WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 100",
-        "countries": f"SELECT COALESCE(NULLIF(country, ''), '(unknown)') AS label, COUNT(*) AS views FROM analytics WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 20",
-        "devices": f"SELECT COALESCE(NULLIF(device_type, ''), '(unknown)') AS label, {metrics} FROM analytics WHERE {window} GROUP BY 1 ORDER BY views DESC",
-        "campaigns": f"SELECT COALESCE(NULLIF(utm_campaign, ''), '(no campaign)') AS label, {metrics} FROM analytics WHERE {window} AND NULLIF(utm_source, '') IS NOT NULL GROUP BY 1 ORDER BY views DESC LIMIT 20",
+    decoded = f"lower({path})"
+    # Decode common scanner encodings; this is a heuristic, not a URL parser/WAF.
+    for _ in range(2):
+        for encoded, literal in (('%25', '%'), ('%2e', '.'), ('%2f', '/'), ('%5c', '/')):
+            decoded = f"replace({decoded}, '{encoded}', '{literal}')"
+    decoded = f"replace({decoded}, char(92), '/')"
+    rules = ' '.join(
+        "WHEN (" + ' OR '.join(f"normalized_path GLOB '{pattern}'" for pattern in patterns)
+        + f") THEN '{reason}'" for reason, patterns in PROBE_RULES.items()
+    )
+    crawler = ' OR '.join(f"instr(lower(COALESCE(user_agent, '')), '{token}') > 0" for token in CRAWLER_TOKENS)
+    prefix = (
+        f"WITH normalized AS (SELECT *, {decoded} AS normalized_path FROM analytics WHERE ts >= {previous} AND ts < {end}), "
+        f"classified AS (SELECT *, CASE {rules} ELSE NULL END AS reason, ({crawler}) AS crawler FROM normalized), "
+        "audience AS (SELECT * FROM classified WHERE reason IS NULL AND NOT crawler) "
+    )
+    statements = {
+        "summary": f"SELECT CASE WHEN ts >= {start} THEN 'current' ELSE 'previous' END AS period, {metrics}, COUNT(DISTINCT NULLIF(session_id, '')) AS browsers, COUNT(DISTINCT NULLIF(country, '')) AS countries, SUM(CASE WHEN duration_ms >= 0 THEN 1 ELSE 0 END) AS duration_samples, SUM(CASE WHEN scroll_pct BETWEEN 0 AND 100 THEN 1 ELSE 0 END) AS scroll_samples, SUM(CASE WHEN NULLIF(session_id, '') IS NOT NULL THEN 1 ELSE 0 END) AS identified, SUM(CASE WHEN NULLIF(utm_source, '') IS NOT NULL THEN 1 ELSE 0 END) AS tagged FROM audience WHERE type = 'page_view' AND ts >= {previous} AND ts < {end} GROUP BY period",
+        "daily": f"SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*) AS views FROM audience WHERE {window} GROUP BY day ORDER BY day",
+        "pages": f"SELECT {path} AS path, {metrics}, SUM(CASE WHEN duration_ms >= 0 AND scroll_pct BETWEEN 0 AND 100 THEN 1 ELSE 0 END) AS measured FROM audience WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 100",
+        "sources": f"SELECT COALESCE(NULLIF(utm_source, ''), NULLIF(referrer, ''), '(direct / unknown)') AS label, {metrics} FROM audience WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 100",
+        "countries": f"SELECT COALESCE(NULLIF(country, ''), '(unknown)') AS label, COUNT(*) AS views FROM audience WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 20",
+        "devices": f"SELECT COALESCE(NULLIF(device_type, ''), '(unknown)') AS label, {metrics} FROM audience WHERE {window} GROUP BY 1 ORDER BY views DESC",
+        "campaigns": f"SELECT COALESCE(NULLIF(utm_campaign, ''), '(no campaign)') AS label, {metrics} FROM audience WHERE {window} AND NULLIF(utm_source, '') IS NOT NULL GROUP BY 1 ORDER BY views DESC LIMIT 20",
     }
+    statements = {key: prefix + sql for key, sql in statements.items()}
+    statements['alerts'] = prefix + (
+        f"SELECT {path} AS path, reason, COUNT(*) AS events, MAX(ts) AS last_seen "
+        f"FROM classified WHERE ts >= {start} AND reason IS NOT NULL "
+        "GROUP BY 1, 2 ORDER BY events DESC, last_seen DESC LIMIT 100"
+    )
+    statements['traffic_quality'] = prefix + (
+        "SELECT COUNT(*) AS recorded, "
+        "SUM(CASE WHEN reason IS NOT NULL THEN 1 ELSE 0 END) AS suspicious, "
+        "SUM(CASE WHEN reason IS NULL AND crawler THEN 1 ELSE 0 END) AS crawlers, "
+        "SUM(CASE WHEN reason IS NULL AND NOT crawler AND NULLIF(trim(user_agent), '') IS NULL THEN 1 ELSE 0 END) AS unknown_agent "
+        f"FROM classified WHERE ts >= {start} AND type = 'page_view' GROUP BY 'current'"
+    )
+    statements['security_summary'] = prefix + (
+        f"SELECT COUNT(*) AS events, COUNT(DISTINCT {path}) AS paths "
+        f"FROM classified WHERE ts >= {start} AND reason IS NOT NULL GROUP BY 'current'"
+    )
+    return statements
 
 
 def collect(days, database):
