@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "website-analytics",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-06",
+  "observability": { "enabled": false },
+  "vars": {
+    "ALLOWED_ORIGINS": "https://example.com"
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "analytics",
+    "database_id": "00000000-0000-0000-0000-000000000000"
+  }]
+}

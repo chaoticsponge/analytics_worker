@@ -6,42 +6,112 @@ Simple, privacy-friendly website analytics built entirely on Cloudflare:
 - Events are stored in a Cloudflare D1 database you control
 - Frontend script (`analytics.js`) tracks page views, time on page, scroll depth, basic device info, and UTM parameters.
 
-No external databases, no third-party trackers, away from googles AD network and completely free for small use-cases like my hobby site.
+No external database or third-party analytics service is required.
 
-## Analytics.py
+## Local analytics dashboard
 
-It's a script for once you create different views in your D1 db to pull analytics easily on device. Works locally with wrangler logged in.
+Run with Python 3.9+ and Node.js / Wrangler installed and authenticated:
 
 ```bash
-pip3 install plotext
+npm install
+cp wrangler.example.jsonc wrangler.jsonc
+# Fill in your database ID, database name, and allowed website origins.
+npx wrangler login
+python3 analytics.py
+# or: npm run dashboard
+```
+
+The script fetches aggregated data from remote D1, starts an HTTP server at
+http://127.0.0.1:8765, and opens your browser. Keep the terminal running;
+Ctrl+C stops the server. No Python packages or frontend build are needed.
+The dashboard uses the base `analytics` table, so custom SQL views are unnecessary.
+
+```bash
+python3 analytics.py --database DB --port 8765
+python3 analytics.py --port 0        # choose an available port
+python3 analytics.py --no-browser   # print the URL without opening it
+```
+
+Choose 7, 30, or 90 days. Each range is fetched once per run; **Refresh data**
+queries D1 again. Requests only read aggregates; they never write analytics or
+expose credentials, raw IPs, or browser IDs to the webpage. The server binds only
+to loopback and serves an explicit asset allowlist. Nothing is published.
+Connection failures appear in the dashboard and can be retried.
+
+The interface includes daily traffic, comparison metrics, sortable/searchable
+page engagement, acquisition, devices, geography, campaigns, recommended actions,
+and a collection audit. Dates use UTC, include partial today, and compare with an
+immediately preceding window of equal duration. Missing chart dates appear as
+zero recorded views; this does not verify that collection was working.
+
+### How to interpret the data
+
+- Counts include only `page_view` events. Query strings are combined before page
+  aggregation. Rankings are capped: 100 pages/sources and 20 countries/campaigns;
+  headline totals query the full date range. Breakdown charts show six entries.
+- Recognized browsers count distinct stored `session_id` values. The sample uses
+  persistent localStorage IDs; these are neither actual visits nor unique people.
+- Time is average elapsed time where nonnegative, and may include background tabs.
+  Scroll is average maximum depth in the valid 0–100 range, not a completion rate.
+  Coverage reports field presence/validity, not collection accuracy.
+- Page recommendations require at least 20 views and 20 paired time/scroll
+  measurements. Scroll below 40% prompts review; scroll at least 70% with at least
+  30 seconds suggests engagement. These are transparent heuristics, not statistical
+  significance or proof of success. Bot filtering is not currently implemented.
+- Sources prefer UTM source, otherwise referrer host. Direct/unknown and
+  self-referrals are included. Referrers are not Search Console clicks.
+
+### Data needed for clearer outcomes
+
+1. **Conversion goals:** named signup/contact/download/click outcomes with a page
+   and campaign reference, so success can be measured beyond traffic.
+2. **Real visit and event IDs:** inactivity-based visits and deduplicated events
+   for funnels and visit-level engagement. Avoid calling persistent browser IDs sessions.
+3. **Reliable attention:** initial pageviews plus deduplicated updates, active
+   visible time, and initial scroll depth. The sample currently sends once when
+   first hidden; later reading is missed, and unscrolled pages report zero depth.
+4. **Search and experience:** Search Console impressions/position/clicks, Core Web
+   Vitals, and errors to help explain acquisition and engagement changes.
+
+The audit is included in the GUI. Collection behavior is unchanged by this
+local dashboard. Before extending tracking, review raw IP/user-agent retention,
+sensitive URL parameters, and bot filtering in the existing collector.
+
+Run dashboard checks with:
+
+```bash
+python3 -m unittest discover -s test -p 'test_*.py' -v
+npm test -- --run
 ```
 
 ## Quick start
 
 ```bash
-git clone https://github.com/chaoticsponge/analytics_worker
-cd analytics-worker
+git clone <your-repository-url>
+cd <repository-directory>
 
-npm install -g wrangler
-wrangler login
+npm install
+cp wrangler.example.jsonc wrangler.jsonc
+npx wrangler login
 
 # create your own D1 database (returns database_id)
-wrangler d1 create <your-database-name>
+npx wrangler d1 create <your-database-name>
 
 # update wrangler.jsonc with your database name and id
 
 # apply the SQL migration
-wrangler d1 migrations apply <your-database-name>
+npx wrangler d1 migrations apply DB --remote
 
 # deploy to your own Worker
-wrangler deploy
+npm run deploy
 ```
 
 ## Configure it for your domain
 
-- In `src/index.js`, set `ALLOWED_ORIGINS` to the origins that can send analytics data.
+- In your ignored `wrangler.jsonc`, set `vars.ALLOWED_ORIGINS` to a comma-separated list of exact website origins that can send analytics data.
 - In `SAMPLE_ANALYTICS.js`, set `ANALYTICS_URL` to **your** Worker endpoint, e.g. `https://<your-worker>.workers.dev/analytics` or `/analytics` if you bind a custom domain.
-- In `wrangler.jsonc`, replace the D1 placeholders with your own `database_name` and `database_id`.
+- Copy `wrangler.example.jsonc` to `wrangler.jsonc` and replace the D1 placeholders with your own `database_name` and `database_id`. Keep the binding named `DB`; both Python tools use it by default.
+- `wrangler.jsonc` is intentionally ignored. Never commit it, credentials, analytics exports, or screenshots containing real traffic data.
 - Move `SAMPLE_ANALYTICS.js` into your site (e.g., `/js/analytics.js`) and include it on the pages you want to track:
   ```html
   <script src="/js/analytics.js"></script>

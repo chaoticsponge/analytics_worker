@@ -2,9 +2,8 @@ var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, 'name', { value, configurable: true });
 
 // src/index.js
-var ALLOWED_ORIGINS = /* @__PURE__ */ new Set(['https://emmr.me']);
-function getCorsHeaders(origin) {
-	if (!origin || !ALLOWED_ORIGINS.has(origin)) return {};
+function getCorsHeaders(origin, allowedOrigins) {
+	if (!origin || !allowedOrigins.has(origin)) return {};
 	return {
 		'Access-Control-Allow-Origin': origin,
 		'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -34,7 +33,6 @@ async function insertAnalyticsEvent(env, req, body) {
 	const full_url = body.full_url || null;
 	const referrer = body.referrer || null;
 	if (full_url && (full_url.startsWith('http://localhost') || full_url.startsWith('http://127.0.0.1') || full_url.startsWith('file://'))) {
-		console.log('Skipping local/dev analytics for URL:', full_url);
 		return { skipped: true };
 	}
 	const user_agent = body.user_agent || headers.get('User-Agent') || null;
@@ -51,7 +49,6 @@ async function insertAnalyticsEvent(env, req, body) {
 	const device_type = body.device_type || device.device_type || device.type || null;
 	const device_os = body.device_os || device.device_os || device.os || null;
 	const device_browser = body.device_browser || device.device_browser || device.browser || null;
-	console.log('analytics payload', JSON.stringify(body));
 	const stmt = env.DB.prepare(
 		`INSERT INTO analytics (
       ts,
@@ -102,7 +99,6 @@ async function insertAnalyticsEvent(env, req, body) {
 			colo,
 		)
 		.run();
-	console.log('D1 insert result:', result);
 	return result;
 }
 __name(insertAnalyticsEvent, 'insertAnalyticsEvent');
@@ -110,13 +106,13 @@ var index_default = {
 	async fetch(request, env, ctx) {
 		const url = new URL(request.url);
 		const origin = request.headers.get('Origin') || '';
-		const corsHeaders = getCorsHeaders(origin);
+		const allowedOrigins = new Set((env.ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean));
+		const corsHeaders = getCorsHeaders(origin, allowedOrigins);
 
 		// Only block explicit foreign origins.
-		const isExplicitForeignOrigin = origin && origin !== 'null' && !ALLOWED_ORIGINS.has(origin);
+		const isExplicitForeignOrigin = origin && origin !== 'null' && !allowedOrigins.has(origin);
 
 		if (url.pathname === '/analytics' && isExplicitForeignOrigin) {
-			console.log('Forbidden origin:', origin);
 			return new Response('Forbidden origin', { status: 403 });
 		}
 

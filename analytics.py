@@ -1,322 +1,142 @@
 #!/usr/bin/env python3
+"""Fetch D1 analytics and serve a private, dependency-free local dashboard."""
+import argparse
 import json
+import os
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+import shutil
 import subprocess
-from datetime import datetime, timezone
-import plotext as plt
+import threading
+from urllib.parse import parse_qs, urlsplit
+import webbrowser
+
+ROOT = Path(__file__).resolve().parent
+DB_NAME = "DB"  # Wrangler D1 binding name
 
 
+def queries(days, now=None):
+    now = now or datetime.now(timezone.utc)
+    end = int(now.timestamp() * 1000)
+    start = int((now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)).timestamp() * 1000)
+    previous = start - (end - start)
+    window = f"type = 'page_view' AND ts >= {start} AND ts < {end}"
+    path = "COALESCE(NULLIF(CASE WHEN instr(path, '?') > 0 THEN substr(path, 1, instr(path, '?') - 1) ELSE path END, ''), '(unknown)')"
+    metrics = "COUNT(*) AS views, AVG(CASE WHEN duration_ms >= 0 THEN duration_ms / 1000.0 END) AS duration, AVG(CASE WHEN scroll_pct BETWEEN 0 AND 100 THEN scroll_pct END) AS scroll"
+    return {
+        "summary": f"SELECT CASE WHEN ts >= {start} THEN 'current' ELSE 'previous' END AS period, {metrics}, COUNT(DISTINCT NULLIF(session_id, '')) AS browsers, COUNT(DISTINCT NULLIF(country, '')) AS countries, SUM(CASE WHEN duration_ms >= 0 THEN 1 ELSE 0 END) AS duration_samples, SUM(CASE WHEN scroll_pct BETWEEN 0 AND 100 THEN 1 ELSE 0 END) AS scroll_samples, SUM(CASE WHEN NULLIF(session_id, '') IS NOT NULL THEN 1 ELSE 0 END) AS identified, SUM(CASE WHEN NULLIF(utm_source, '') IS NOT NULL THEN 1 ELSE 0 END) AS tagged FROM analytics WHERE type = 'page_view' AND ts >= {previous} AND ts < {end} GROUP BY period",
+        "daily": f"SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*) AS views FROM analytics WHERE {window} GROUP BY day ORDER BY day",
+        "pages": f"SELECT {path} AS path, {metrics}, SUM(CASE WHEN duration_ms >= 0 AND scroll_pct BETWEEN 0 AND 100 THEN 1 ELSE 0 END) AS measured FROM analytics WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 100",
+        "sources": f"SELECT COALESCE(NULLIF(utm_source, ''), NULLIF(referrer, ''), '(direct / unknown)') AS label, {metrics} FROM analytics WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 100",
+        "countries": f"SELECT COALESCE(NULLIF(country, ''), '(unknown)') AS label, COUNT(*) AS views FROM analytics WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 20",
+        "devices": f"SELECT COALESCE(NULLIF(device_type, ''), '(unknown)') AS label, {metrics} FROM analytics WHERE {window} GROUP BY 1 ORDER BY views DESC",
+        "campaigns": f"SELECT COALESCE(NULLIF(utm_campaign, ''), '(no campaign)') AS label, {metrics} FROM analytics WHERE {window} AND NULLIF(utm_source, '') IS NOT NULL GROUP BY 1 ORDER BY views DESC LIMIT 20",
+    }
 
-DB_NAME = "emstat"  # change this to your D1 name
 
-# Colors
-C_RESET = "\033[0m"
-C_BOLD = "\033[1m"
-C_DIM = "\033[2m"
-C_BLUE = "\033[94m"
-C_GREEN = "\033[92m"
-C_YELLOW = "\033[93m"
-C_CYAN = "\033[96m"
-C_MAGENTA = "\033[95m"
-
-def run_sql(sql):
-    """
-    Run `wrangler d1 execute` with --json and return rows (list of dicts).
-    Works with wrangler 4.50's JSON shape.
-    """
-    cmd = [
-        "wrangler",
-        "d1",
-        "execute",
-        DB_NAME,
-        "--remote",
-        "--command",
-        sql,
-        "--json",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        print(C_YELLOW + "SQL error:" + C_RESET, result.stderr.strip())
-        return []
-
-    stdout = result.stdout.strip()
-    if not stdout:
-        return []
-
+def collect(days, database):
+    statements = queries(days)
+    wrangler = ROOT / 'node_modules' / '.bin' / 'wrangler'
+    executable = shutil.which('wrangler')
+    if not executable and os.access(wrangler, os.X_OK):
+        executable = str(wrangler)
+    if not executable:
+        raise RuntimeError('Wrangler is missing. Run npm install, then wrangler login.')
     try:
-        obj = json.loads(stdout)
-    except json.JSONDecodeError:
-        print(C_YELLOW + "Failed to parse JSON from wrangler; raw output:" + C_RESET)
-        print(stdout)
-        return []
-
-    # Wrangler 4.50 format is typically:
-    # [
-    #   {
-    #     "results": [ { ... }, ... ],
-    #     "success": true,
-    #     "meta": {...}
-    #   }
-    # ]
-    if isinstance(obj, list):
-        if not obj:
-            return []
-        first = obj[0]
-        if isinstance(first, dict) and "results" in first and isinstance(first["results"], list):
-            return first["results"]
-        # fallback: maybe it's already a list of row dicts
-        return obj
-
-    if isinstance(obj, dict):
-        # Older or alternate shapes
-        if "results" in obj and isinstance(obj["results"], list):
-            return obj["results"]
-        if "result" in obj:
-            res = obj["result"]
-            if isinstance(res, list):
-                return res
-            if isinstance(res, dict) and "results" in res and isinstance(res["results"], list):
-                return res["results"]
-        return []
-
-    return []
+        result = subprocess.run([executable, 'd1', 'execute', database, '--remote', '--command', ';\n'.join(statements.values()) + ';', '--json'], cwd=ROOT, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError('D1 did not respond within 120 seconds. Check your connection and retry.') from exc
+    if result.returncode:
+        raise RuntimeError('D1 query failed. Check the terminal, your Wrangler login, and database name.')
+    try:
+        results = json.loads(result.stdout)
+        if not isinstance(results, list) or len(results) != len(statements):
+            raise ValueError('Unexpected number of query results')
+        if any(item.get('success') is False or not isinstance(item.get('results'), list) for item in results):
+            raise ValueError('Unsuccessful query')
+        data = {key: item['results'] for key, item in zip(statements, results)}
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError('Wrangler returned an unexpected response; update Wrangler and retry.') from exc
+    return {**data, 'days': days, 'updated': datetime.now(timezone.utc).isoformat(), 'database': database}
 
 
+def make_handler(database, cache):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            # Reject cross-origin reads and DNS rebinding, even on loopback.
+            address = f'127.0.0.1:{self.server.server_port}'
+            if self.headers.get('Host') != address or self.headers.get('Origin') not in (None, f'http://{address}') or self.headers.get('Sec-Fetch-Site') == 'cross-site':
+                self.respond(403, b'Forbidden', 'text/plain')
+                return
+            url = urlsplit(self.path)
+            if url.path == '/api/data':
+                params = parse_qs(url.query)
+                try:
+                    days = int(params.get('days', ['30'])[0])
+                    if days not in (7, 30, 90):
+                        raise ValueError()
+                except ValueError:
+                    self.respond(400, b'{"error":"Choose 7, 30, or 90 days."}', 'application/json')
+                    return
+                try:
+                    if days not in cache or params.get('refresh') == ['1']:
+                        cache[days] = collect(days, database)
+                    self.respond(200, json.dumps(cache[days]).encode(), 'application/json')
+                except (RuntimeError, OSError) as exc:
+                    print(f'Analytics: {exc}', flush=True)
+                    self.respond(502, json.dumps({'error': str(exc)}).encode(), 'application/json')
+                return
+            assets = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
+            if url.path not in assets:
+                self.respond(404, b'Not found', 'text/plain')
+                return
+            filename, content_type = assets[url.path]
+            self.respond(200, (ROOT / 'dashboard' / filename).read_bytes(), content_type)
 
+        def respond(self, status, body, content_type):
+            self.send_response(status)
+            self.send_header('Content-Type', content_type + '; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+            self.end_headers()
+            self.wfile.write(body)
 
-def print_table(title, rows, columns):
-    print(f"\n{C_BOLD}{title}{C_RESET}")
-    if not rows:
-        print(C_DIM + "(no data)" + C_RESET)
-        return
-
-    widths = {col: len(col) for col in columns}
-    for row in rows:
-        for col in columns:
-            widths[col] = max(widths[col], len(str(row.get(col, ""))))
-
-    header = "  ".join(C_CYAN + col.ljust(widths[col]) + C_RESET for col in columns)
-    print(header)
-    print("-" * (sum(widths.values()) + 2 * (len(columns) - 1)))
-
-    for r in rows:
-        line = "  ".join(str(r.get(col, "")).ljust(widths[col]) for col in columns)
-        print(line)
-
-
-def print_bar_chart(title, rows, label_key, value_key, max_width=40):
-    print(f"\n{C_BOLD}{title}{C_RESET}")
-    if not rows:
-        print(C_DIM + "(no data)" + C_RESET)
-        return
-
-    max_val = max((r.get(value_key, 0) or 0) for r in rows) or 1
-
-    for r in rows:
-        label = str(r.get(label_key, ""))
-        val = int(r.get(value_key, 0) or 0)
-        bar_len = max(1, int(val / max_val * max_width)) if val > 0 else 0
-        bar = "█" * bar_len
-        print(f"{label:>10} {bar} {val}")
-
-def plot_daily_pageviews(daily_rows):
-    import plotext as plt
-    if not daily_rows:
-        print("No daily data to plot.")
-        return
-
-    # chronological order
-    days = [row["day"] for row in daily_rows]
-    views = [row["views"] for row in daily_rows]
-    x = list(range(len(days)))
-
-    plt.clear_figure()
-    plt.limit_size(True, True)
-    plt.plot_size(30, 10)
-
-    plt.title("Daily Pageviews (Last 30 Days)")
-    plt.xlabel("Index (0 = oldest)")
-    plt.ylabel("Views")
-
-    # disable date handling completely
-    plt.date_form("none")
-
-    plt.plot(x, views, marker="dot", color="cyan")
-    plt.scatter(x, views, color="red")
-
-    # Add x-labels underneath if desired
-    for i, d in enumerate(days):
-        print(f"{i}: {d}")
-
-    plt.show()
-
-
-
-def plot_monthly_pageviews(monthly_rows):
-    import plotext as plt
-    if not monthly_rows:
-        print("No monthly data to plot.")
-        return
-
-    months = [row["month"] for row in monthly_rows]
-    views = [row["views"] for row in monthly_rows]
-    x = list(range(len(months)))
-
-    plt.clear_figure()
-    plt.limit_size(True, True)
-    plt.plot_size(30, 10)
-
-    plt.title("Monthly Pageviews (All Time)")
-    plt.xlabel("Index (oldest → newest)")
-    plt.ylabel("Views")
-
-    plt.date_form("none")
-
-    plt.bar(x, views)
-
-    for i, m in enumerate(months):
-        print(f"{i}: {m}")
-
-    plt.show()
-
-
-
-def strip_query_from_paths(rows, key="path"):
-    """
-    Remove query strings from path-like fields so UTM/fbclid params
-    don't clutter the dashboard output.
-    """
-    for row in rows or []:
-        val = row.get(key)
-        if isinstance(val, str) and "?" in val:
-            row[key] = val.split("?", 1)[0]
+        def log_message(self, *_):
+            pass
+    return Handler
 
 
 def main():
-    # Views based on the SQL views you created in D1
-    v_posts = run_sql(
-        "SELECT path, full_url, events, avg_duration_s, avg_scroll_pct "
-        "FROM v_top_posts_by_duration "
-        "ORDER BY avg_duration_s DESC "
-        "LIMIT 20;"
-    )
-    v_countries = run_sql(
-        "SELECT country, hits "
-        "FROM v_top_countries "
-        "ORDER BY hits DESC "
-        "LIMIT 20;"
-    )
-    v_referrers = run_sql(
-        "SELECT "
-        "  COALESCE(referrer, '(none)') AS referrer, "
-        "  COUNT(*) AS hits "
-        "FROM analytics "
-        "WHERE referrer IS NOT NULL "
-        "  AND referrer NOT LIKE '%emmr.me%' "  # skip self-referrals
-        "GROUP BY referrer "
-        "ORDER BY hits DESC "
-        "LIMIT 20;"
-    )
-    v_google = run_sql(
-        "SELECT path, full_url, google_clicks "
-        "FROM v_google_clicks_by_page "
-        "ORDER BY google_clicks DESC "
-        "LIMIT 20;"
-    )
-    v_days = run_sql(
-        "SELECT day, views "
-        "FROM v_pageviews_by_day "
-        "ORDER BY day DESC "
-        "LIMIT 30;"
-    )
-
-    # Monthly aggregation (all time)
-    v_months = run_sql(
-        "SELECT "
-        "  strftime('%Y-%m', ts/1000, 'unixepoch') AS month, "
-        "  COUNT(*) AS views "
-        "FROM analytics "
-        "WHERE type = 'page_view' "
-        "GROUP BY month "
-        "ORDER BY month;"
-    )
-
-    # KPIs
-    strip_query_from_paths(v_posts, "path")
-    strip_query_from_paths(v_google, "path")
-
-    total_30_days = sum(int(r.get("views", 0) or 0) for r in v_days)
-    unique_countries = len(v_countries)
-    total_google = sum(int(r.get("google_clicks", 0) or 0) for r in v_google)
-
-    if v_posts:
-        avg_engagement = (
-            sum(float(r.get("avg_duration_s", 0) or 0) for r in v_posts)
-            / len(v_posts)
-        )
-    else:
-        avg_engagement = 0.0
-
-    print(C_MAGENTA + C_BOLD + "\n=== ANALYTICS DASHBOARD ===\n" + C_RESET)
-
-    # KPI Summary
-    print(C_BOLD + "KPI Summary" + C_RESET)
-    print(f"{C_GREEN}Total pageviews (last 30d):{C_RESET}  {total_30_days}")
-    print(f"{C_GREEN}Unique countries:{C_RESET}            {unique_countries}")
-    print(f"{C_GREEN}Google landings (all time):{C_RESET}  {total_google}")
-    print(f"{C_GREEN}Avg engagement (top posts):{C_RESET}  {round(avg_engagement, 1)}s\n")
-
-    # Tables
-    print_table(
-        "Top Posts by Engagement",
-        v_posts,
-        ["path", "events", "avg_duration_s", "avg_scroll_pct"],
-    )
-
-    print_table(
-        "Top Countries",
-        v_countries,
-        ["country", "hits"],
-    )
-
-    print_table(
-        "Top Referrers",
-        v_referrers,
-        ["referrer", "hits"],
-    )
-
-    print_table(
-        "Google Clicks by Page",
-        v_google,
-        ["path", "google_clicks"],
-    )
-
-    print_table(
-        "Pageviews by Day (UTC, last 30 days)",
-        v_days,
-        ["day", "views"],
-    )
-
-    # Charts
-    # Reverse days for chronological order (oldest -> newest)
-    v_days_chrono = list(reversed(v_days))
-
-    print("\n\nDaily Pageviews Plot:\n")
-    plot_daily_pageviews(v_days_chrono)
-
-    print("\n\nMonthly Pageviews Plot:\n")
-    plot_monthly_pageviews(v_months)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--database', default=DB_NAME)
+    parser.add_argument('--port', type=int, default=8765, help='Local HTTP port (0 selects an available port)')
+    parser.add_argument('--no-browser', action='store_true')
+    args = parser.parse_args()
+    cache = {}
+    try:
+        server = HTTPServer(('127.0.0.1', args.port), make_handler(args.database, cache))
+    except OSError as exc:
+        parser.exit(1, f'Cannot start dashboard: {exc}. Try --port 0.\n')
+    print('Fetching analytics from D1…', flush=True)
+    try:
+        cache[30] = collect(30, args.database)
+    except (RuntimeError, OSError) as exc:
+        print(f'{exc} You can retry from the dashboard.', flush=True)
+    url = f'http://127.0.0.1:{server.server_port}'
+    print(f'Dashboard: {url}\nPress Ctrl+C to stop.', flush=True)
+    if not args.no_browser:
+        threading.Timer(0.3, webbrowser.open, args=(url,)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print('\nDashboard stopped.')
+    finally:
+        server.server_close()
 
 
-    print()
-    print(
-        C_DIM
-        + "Last updated: "
-        + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        + C_RESET
-    )
-    print()
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

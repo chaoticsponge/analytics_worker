@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 
-DB_NAME = "emstat"  # set to your D1 name if different
+DB_NAME = "DB"  # Wrangler D1 binding name
 
 
 def run_sql(sql: str):
