@@ -80,12 +80,12 @@ export default {
 	async scheduled(_controller, env) {
 		const configured = Number(env.RETENTION_DAYS || 90);
 		const days = Number.isInteger(configured) && configured >= 7 && configured <= 365 ? configured : 90;
-		// Only v2 records are subject to the new retention policy. Leave legacy records intact.
+		// Only records written by this collector are subject to its retention policy. Leave legacy records intact.
 		const configuredIpDays = Number(env.IP_RETENTION_DAYS || 7);
 		const ipDays = Number.isInteger(configuredIpDays) && configuredIpDays >= 1 && configuredIpDays <= 30 ? configuredIpDays : 7;
 		await env.DB.batch([
-			env.DB.prepare('DELETE FROM analytics WHERE tracker_version = 2 AND ts < ?').bind(Date.now() - days * 86400000),
-			env.DB.prepare('UPDATE analytics SET ip = NULL WHERE tracker_version = 2 AND ip IS NOT NULL AND ts < ?').bind(Date.now() - ipDays * 86400000),
+			env.DB.prepare('DELETE FROM analytics WHERE tracker_version IN (1, 2) AND ts < ?').bind(Date.now() - days * 86400000),
+			env.DB.prepare('UPDATE analytics SET ip = NULL WHERE tracker_version IN (1, 2) AND ip IS NOT NULL AND ts < ?').bind(Date.now() - ipDays * 86400000),
 			env.DB.prepare('DELETE FROM visitors WHERE last_seen < ?').bind(Date.now() - 90 * 86400000),
 		]);
 	},
@@ -106,14 +106,21 @@ export default {
 		let body;
 		try { body = await readBody(request); }
 		catch (error) { return respond('Invalid request', error.message === 'size' ? 413 : 400); }
-		if (!body || Array.isArray(body) || body.tracker_version !== 2 || body.type !== 'page_view'
-			|| typeof body.event_id !== 'string' || !UUID.test(body.event_id)
-			|| !Number.isInteger(body.active_ms) || body.active_ms < 0 || body.active_ms > 86400000
+		// Accept old cached trackers during rollout; mark elapsed-time measurements explicitly.
+		const legacy = body?.tracker_version === undefined && body?.type === 'page_view';
+		const version = legacy ? 1 : body?.tracker_version;
+		const eventId = legacy ? crypto.randomUUID() : body?.event_id;
+		const duration = legacy ? body.duration_ms : body?.active_ms;
+		if (!body || Array.isArray(body) || (!legacy && version !== 2) || body.type !== 'page_view'
+			|| typeof eventId !== 'string' || !UUID.test(eventId)
+			|| !Number.isInteger(duration) || duration < 0 || duration > 86400000
 			|| !Number.isInteger(body.scroll_pct) || body.scroll_pct < 0 || body.scroll_pct > 100) return respond('Invalid event', 400);
 		const path = publicPath(body.path, list(env.PUBLIC_PATHS || '/'));
 		if (path === null) return respond('Invalid path', 400);
 		const device = deviceInfo(request, body);
-		const visitor = env.TRACK_VISITORS !== 'false' && device.type !== 'bot'
+		const session = legacy && env.TRACK_VISITORS !== 'false' && device.type !== 'bot'
+			&& typeof body.session_id === 'string' && /^[a-z0-9]{16,64}$/i.test(body.session_id) ? body.session_id : null;
+		const visitor = !legacy && env.TRACK_VISITORS !== 'false' && device.type !== 'bot'
 			&& typeof body.visitor_id === 'string' && UUID.test(body.visitor_id) ? body.visitor_id : null;
 		// Cloudflare supplies this header; never trust the payload or X-Forwarded-For.
 		const connectingIp = request.headers.get('CF-Connecting-IP') || '';
@@ -128,14 +135,14 @@ export default {
                 ts, type, path, referrer, duration_ms, scroll_pct, session_id,
                 utm_source, utm_campaign, device_type, device_os, device_browser,
                 country, event_id, tracker_version, device_source, viewport_class, visitor_id, ip, bot_name
-            ) VALUES (?, 'page_view', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?)
+            ) VALUES (?, 'page_view', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(event_id) DO UPDATE SET
                 duration_ms = MAX(analytics.duration_ms, excluded.duration_ms),
                 scroll_pct = MAX(analytics.scroll_pct, excluded.scroll_pct)
             WHERE analytics.path = excluded.path AND analytics.tracker_version = 2`)
-				.bind(now, path, referrerHost(body.referrer, env, origin), body.active_ms,
-					body.scroll_pct, null, source, campaign, device.type, device.os, device.browser,
-					country, body.event_id, device.source, viewport, visitor, ip, device.bot);
+				.bind(now, path, referrerHost(body.referrer, env, origin), duration,
+					body.scroll_pct, session, source, campaign, device.type, device.os, device.browser,
+					country, eventId, version, device.source, viewport, visitor, ip, device.bot);
 			const statements = [insert];
 			if (visitor) statements.push(env.DB.prepare(`INSERT INTO visitors (visitor_id, first_seen, last_seen)
                 VALUES (?, ?, ?) ON CONFLICT(visitor_id) DO UPDATE SET last_seen = MAX(visitors.last_seen, excluded.last_seen)`)

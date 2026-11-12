@@ -65,14 +65,15 @@ Edit your ignored `wrangler.jsonc`:
   header, never from the client payload or X-Forwarded-For. Set to `false` to stop
   new IP collection. IPs do not reliably identify a person (NAT/VPNs/shared networks).
 - `IP_RETENTION_DAYS` defaults to 7, valid range 1–30. Daily cleanup clears IPs
-  from older v2 rows while retaining their aggregate measurement fields.
+  from older versioned rows while retaining their aggregate measurement fields.
 - `COLLECT_COUNTRY` defaults to `false`; if enabled, only the country code is stored.
 - Campaign collection is disabled unless you explicitly configure
   `CAMPAIGN_SOURCES` and `CAMPAIGN_NAMES` and enable it in the script tag. Only
   exact allowlisted values are stored. Search terms and free-form UTM values are
   not stored.
 - `RETENTION_DAYS` defaults to 90, with a daily cleanup at 03:00 UTC. This deletes
-  expired v2 rows, not legacy rows. Visitor metadata expires after 90 days without
+  expired rows written by the new collector (versions 1 and 2), not historical
+  unversioned rows. Visitor metadata expires after 90 days without
   a recorded activity. Cleanup happens on the next scheduled run, so removal can
   lag by a day. Valid event-retention settings are 7–365 days. Short retention
   means longer comparison windows may have incomplete baselines.
@@ -119,7 +120,9 @@ and use only public, nonpersonal values in `utm_source` and `utm_campaign`.
    unrecorded, review Wrangler's migration plan: 0001 uses `IF NOT EXISTS` and
    can run against the existing table. Never run the ALTER statements twice.
 3. Deploy the Worker, then replace the website tracker and script tags promptly.
-   The v2 Worker rejects old payloads; the old tracker must be replaced too.
+   The new Worker accepts cached legacy payloads during rollout, marking them as
+   version 1 with elapsed-time measurements. Replace the tracker to get v2
+   active-time updates, deduplication, and expiring browser IDs.
 4. Clear any website/CDN cache for the tracker and test from a phone and computer.
    In the browser Network panel, successful POSTs return 204. Repeated updates
    for one page have the same event ID and produce one D1 row.

@@ -44,6 +44,15 @@ describe('Privacy analytics Worker', () => {
 		expect(row).toMatchObject({ path: '/about', device_type: 'mobile', device_os: 'iOS', device_browser: 'Safari', viewport_class: 'small', ip: '192.0.2.9', visitor_id: body.visitor_id, referrer: 'www.google.com', utm_source: 'newsletter', utm_campaign: 'launch', tracker_version: 2 });
 		for (const field of ['user_agent', 'full_url', 'city', 'colo', 'session_id', 'utm_term', 'utm_content', 'country']) expect(row[field]).toBeNull();
 	});
+	it('accepts a cached legacy tracker without storing its raw payload fields', async () => {
+		const response = await post({ type: 'page_view', path: '/about?private=1', duration_ms: 17000,
+			scroll_pct: 20, session_id: 'abcdefghijklmnop1234', full_url: 'https://example.com/about?private=1',
+			user_agent: 'private raw UA', ip: '192.0.2.99' }, { 'CF-Connecting-IP': '192.0.2.1' });
+		expect(response.status).toBe(204);
+		expect((await rows())[0]).toMatchObject({ path: '/about', duration_ms: 17000,
+			tracker_version: 1, session_id: 'abcdefghijklmnop1234', visitor_id: null,
+			full_url: null, user_agent: null, ip: '192.0.2.1' });
+	});
 	it('deduplicates out-of-order retries without reducing engagement', async () => {
 		const body = event();
 		for (const values of [{ active_ms: 20000, scroll_pct: 80 }, { active_ms: 10000, scroll_pct: 40 }, { active_ms: 20000, scroll_pct: 80 }]) {
