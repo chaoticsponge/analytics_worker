@@ -1,186 +1,221 @@
-# Cloudflare Analytics Worker (Workers + D1)
+# Cloudflare Analytics Worker + local dashboard
 
-Simple, privacy-friendly website analytics built entirely on Cloudflare:
+Self-hosted website analytics using a Cloudflare Worker, D1, and a local Python
+dashboard. The v2 collector measures content performance and estimates returning
+browsers using random IDs, with short-lived IP logs for security review.
 
-- Cloudflare Worker receives browser events on `POST /analytics`
-- Events are stored in a Cloudflare D1 database you control
-- Frontend script (`analytics.js`) tracks page views, time on page, scroll depth, basic device info, and UTM parameters.
+## What the minimal setup measures
 
-No external database or third-party analytics service is required.
+- Pageviews for explicitly approved public page names.
+- Coarse device, OS, and browser categories; unknown devices stay unknown.
+- A broad viewport category: small, medium, or large.
+- Approximate visible reading time, stopping after 60 seconds without interaction.
+- Maximum scroll depth, including the initial viewport.
+- Approved referral hostnames; other referrals become one generic category.
+- Possible sensitive-path probes, stored as fixed categories.
 
-## Local analytics dashboard
+The default configuration stores a random browser ID in localStorage for **90
+days**, and a network IP in D1 for **7 days** for security review. This is
+pseudonymous analytics, not anonymous analytics. It uses no cookies, raw stored
+user-agent strings, full URLs, cities, or IP-based fingerprints. Each pageview
+also has a separate in-memory random ID so cumulative updates and retries update
+one row instead of adding views. There are no session/visit IDs.
 
-Run with Python 3.9+ and Node.js / Wrangler installed and authenticated:
+The dashboard reports **unique browsers**, with **new + returning = unique** for
+the selected window. New means first observed within that window; returning means
+first observed before it. First-seen history is retained separately from event
+rows. These are browser estimates, not verified people: storage deletion, another
+device/browser, private browsing, ID expiry, and the v2 upgrade can create a new
+identity. Browsers blocking storage are excluded from unique counts, but their
+pageviews still count. Bots that look human can remain in estimates.
 
-```bash
-npm install
-cp wrangler.example.jsonc wrangler.jsonc
-# Fill in your database ID, database name, and allowed website origins.
-npx wrangler login
-python3 analytics.py
-# or: npm run dashboard
-```
+GPC and Do Not Track suppress collection. Requests omit credentials and the HTTP
+Referer header. The Worker briefly processes the request user agent to derive
+coarse categories, but never writes or logs it. Cloudflare still receives network
+metadata while handling HTTP requests; this code does not control platform logs
+or backups. Data minimization is not a guarantee that every jurisdiction permits
+analytics without consent. No consent popup is implemented by this repository;
+that is not a compliance guarantee. Review your obligations and disclose browser
+ID/IP collection in your privacy notice. The [UAE government describes the UAE's
+personal-data protection framework](https://u.ae/en/about-the-uae/digital-uae/data/data-protection-laws);
+being based in Dubai does not by itself establish an exemption.
 
-The script fetches aggregated data from remote D1, starts an HTTP server at
-http://127.0.0.1:8765, and opens your browser. Keep the terminal running;
-Ctrl+C stops the server. No Python packages or frontend build are needed.
-The dashboard uses the base `analytics` table, so custom SQL views are unnecessary.
+## Fresh installation
 
-```bash
-python3 analytics.py --database DB --port 8765
-python3 analytics.py --port 0        # choose an available port
-python3 analytics.py --no-browser   # print the URL without opening it
-```
-
-Choose 7, 30, or 90 days. Each range is fetched once per run; **Refresh data**
-queries D1 again. Requests only read aggregates; they never write analytics or
-expose credentials, raw IPs, or browser IDs to the webpage. The server binds only
-to loopback and serves an explicit asset allowlist. Nothing is published.
-Connection failures appear in the dashboard and can be retried.
-
-The interface includes daily traffic, comparison metrics, sortable/searchable
-page engagement, acquisition, devices, geography, campaigns, recommended actions,
-and a collection audit. Dates use UTC, include partial today, and compare with an
-immediately preceding window of equal duration. Missing chart dates appear as
-zero recorded views; this does not verify that collection was working.
-
-### How to interpret the data
-
-- Counts include only `page_view` events. Query strings are combined before page
-  aggregation. Rankings are capped: 100 pages/sources and 20 countries/campaigns;
-  headline totals query the full date range. Breakdown charts show six entries.
-  Audience metrics consistently exclude recognized crawler user-agent claims and
-  suspicious paths in both current and comparison periods.
-- Recognized browsers count distinct stored `session_id` values. The sample uses
-  persistent localStorage IDs; these are neither actual visits nor unique people.
-- Time is average elapsed time where nonnegative, and may include background tabs.
-  Scroll is average maximum depth in the valid 0–100 range, not a completion rate.
-  Coverage reports field presence/validity, not collection accuracy.
-- Page recommendations require at least 20 views and 20 paired time/scroll
-  measurements. Scroll below 40% prompts review; scroll at least 70% with at least
-  30 seconds suggests engagement. These are transparent heuristics, not statistical
-  significance or proof of success. Security alerts have no minimum sample size.
-- Sources prefer UTM source, otherwise referrer host. Direct/unknown and
-  self-referrals are included. Referrers are not Search Console clicks.
-
-### Data needed for clearer outcomes
-
-1. **Conversion goals:** named signup/contact/download/click outcomes with a page
-   and campaign reference, so success can be measured beyond traffic.
-2. **Real visit and event IDs:** inactivity-based visits and deduplicated events
-   for funnels and visit-level engagement. Avoid calling persistent browser IDs sessions.
-3. **Reliable attention:** initial pageviews plus deduplicated updates, active
-   visible time, and initial scroll depth. The sample currently sends once when
-   first hidden; later reading is missed, and unscrolled pages report zero depth.
-4. **Search and experience:** Search Console impressions/position/clicks, Core Web
-   Vitals, and errors to help explain acquisition and engagement changes.
-
-The audit is included in the GUI. Collection behavior is unchanged by this
-local dashboard. Before extending tracking, review raw IP/user-agent retention,
-sensitive URL parameters, and bot filtering in the existing collector.
-
-Run dashboard checks with:
+Requirements: Node.js compatible with Wrangler, Python 3.9+, and a Cloudflare account.
 
 ```bash
-python3 -m unittest discover -s test -p 'test_*.py' -v
-node --test test/dashboard-ui.cjs
-npm test -- --run
-```
-
-## Suspicious paths and crawler filtering
-
-A separate **Security alerts** panel flags even one recorded event targeting
-sensitive files (such as `/.env.bak` or `/.git/config`), `/app/config/`, common
-admin/debug probes, and traversal patterns. Case and common encoded dot/slash
-variants are handled. Rules are defined in `PROBE_RULES` in `analytics.py`.
-These are possible probes, not proof of compromise; legitimate application
-routes may also match. Review origin access logs, HTTP response status, and WAF
-events to determine what happened.
-
-Security alerts query all recorded event types independently of the top-content
-limit. The panel shows the top 100 path/rule groups, with an uncapped event total.
-Suspicious paths remain visible here even when the sender claims to be Googlebot.
-They are excluded from content engagement recommendations and audience metrics.
-
-Known search, indexing, SEO, AI, and preview crawler user-agent tokens in
-`CRAWLER_TOKENS` are excluded from every audience query, including comparisons.
-Exclusion counts are visible; suspicious pageviews and other crawler pageviews
-are counted separately without double counting. Raw D1 records are retained.
-This does not block crawling or change search indexing.
-
-User-agent strings are self-reported and can be spoofed. This is heuristic
-filtering, not verified human/bot classification. Missing user agents remain in
-audience metrics with an explicit count. For stronger attribution, collect
-verified bot signals at the **website's edge**, rather than trusting the browser
-payload or the user agent of a beacon POST. See [Google's verification guidance](https://developers.google.com/search/docs/crawling-indexing/googlebot)
-and [Cloudflare bot signals](https://developers.cloudflare.com/bots/reference/bot-management-variables/).
-
-Browser analytics only sees events that reach the collector. Scanners that never
-execute JavaScript will be missing; complete security visibility needs website
-access/WAF logs with requested paths, response statuses, and mitigation actions.
-Refreshing or restarting the dashboard applies these rules to historical records;
-no schema migration or Worker redeployment is needed.
-
-## Quick start
-
-```bash
-git clone <your-repository-url>
-cd <repository-directory>
-
-npm install
+npm ci
 cp wrangler.example.jsonc wrangler.jsonc
 npx wrangler login
-
-# create your own D1 database (returns database_id)
 npx wrangler d1 create <your-database-name>
+```
 
-# update wrangler.jsonc with your database name and id
+Edit your ignored `wrangler.jsonc`:
 
-# apply the SQL migration
+- Set the Worker `name`, D1 `database_name`, and returned `database_id`.
+- Set `ALLOWED_ORIGINS` to exact website origins, separated by commas.
+- Set `PUBLIC_PATHS` to the public page names you want to measure, separated by
+  commas. Use a fixed route name such as `/article/:slug` where a real path might
+  contain private information. Never allowlist personal account paths or tokens.
+- Set `REFERRER_HOSTS` to approved public referrer hostnames.
+- `TRACK_VISITORS` defaults to `true`. To disable browser tracking, set it to
+  `false` **and** add `data-track-visitors="false"` to the website script tag.
+- `LOG_IPS` defaults to `true`. IPs come only from Cloudflare's connecting-IP
+  header, never from the client payload or X-Forwarded-For. Set to `false` to stop
+  new IP collection. IPs do not reliably identify a person (NAT/VPNs/shared networks).
+- `IP_RETENTION_DAYS` defaults to 7, valid range 1–30. Daily cleanup clears IPs
+  from older v2 rows while retaining their aggregate measurement fields.
+- `COLLECT_COUNTRY` defaults to `false`; if enabled, only the country code is stored.
+- Campaign collection is disabled unless you explicitly configure
+  `CAMPAIGN_SOURCES` and `CAMPAIGN_NAMES` and enable it in the script tag. Only
+  exact allowlisted values are stored. Search terms and free-form UTM values are
+  not stored.
+- `RETENTION_DAYS` defaults to 90, with a daily cleanup at 03:00 UTC. This deletes
+  expired v2 rows, not legacy rows. Visitor metadata expires after 90 days without
+  a recorded activity. Cleanup happens on the next scheduled run, so removal can
+  lag by a day. Valid event-retention settings are 7–365 days. Short retention
+  means longer comparison windows may have incomplete baselines.
+
+Then apply both migrations before deploying:
+
+```bash
 npx wrangler d1 migrations apply DB --remote
-
-# deploy to your own Worker
 npm run deploy
 ```
 
-## Configure it for your domain
+Copy `SAMPLE_ANALYTICS.js` into your website as `/js/analytics.js`. On each public
+page, use its approved name and your Worker endpoint:
 
-- In your ignored `wrangler.jsonc`, set `vars.ALLOWED_ORIGINS` to a comma-separated list of exact website origins that can send analytics data.
-- In `SAMPLE_ANALYTICS.js`, set `ANALYTICS_URL` to **your** Worker endpoint, e.g. `https://<your-worker>.workers.dev/analytics` or `/analytics` if you bind a custom domain.
-- Copy `wrangler.example.jsonc` to `wrangler.jsonc` and replace the D1 placeholders with your own `database_name` and `database_id`. Keep the binding named `DB`; both Python tools use it by default.
-- `wrangler.jsonc` is intentionally ignored. Never commit it, credentials, analytics exports, or screenshots containing real traffic data.
-- Move `SAMPLE_ANALYTICS.js` into your site (e.g., `/js/analytics.js`) and include it on the pages you want to track:
-  ```html
-  <script src="/js/analytics.js"></script>
-  ```
-
-## D1 schema
-
-`migrations/0001_create_analytics.sql`:
-
-```sql
-CREATE TABLE IF NOT EXISTS analytics (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts INTEGER NOT NULL,
-  type TEXT,
-  path TEXT,
-  full_url TEXT,
-  referrer TEXT,
-  user_agent TEXT,
-  duration_ms INTEGER,
-  scroll_pct INTEGER,
-  session_id TEXT,
-  utm_source TEXT,
-  utm_medium TEXT,
-  utm_campaign TEXT,
-  utm_term TEXT,
-  utm_content TEXT,
-  device_type TEXT,
-  device_os TEXT,
-  device_browser TEXT,
-  ip TEXT,
-  country TEXT,
-  city TEXT,
-  colo TEXT
-);
+```html
+<script src="/js/analytics.js"
+        data-endpoint="https://your-worker.workers.dev/analytics"
+        data-page="/about" defer></script>
 ```
+
+`data-page` must match `PUBLIC_PATHS` exactly. If missing or unapproved, it is
+counted as `/[unlisted]`. The script **never sends the raw current URL
+path, query string, or fragment**. This prevents accidental collection of account
+names, search terms, and token-bearing URLs. Set the public name in your template;
+there is no visitor popup added by this code. Known suspicious paths are detected
+locally and sent as fixed categories even if the page uses a public fallback
+name. Arbitrary requested paths are not transmitted.
+
+For a single-page app, update the script's `data-page` to the new public route
+name and dispatch `window.dispatchEvent(new Event('analytics:navigate'))` after
+each navigation. The old view is flushed before a new pageview starts.
+
+To attribute a controlled campaign, add `data-campaigns="true"` to the script tag
+and use only public, nonpersonal values in `utm_source` and `utm_campaign`.
+
+## Upgrade an existing installation
+
+1. Keep your local `wrangler.jsonc`; **do not replace it** with the example.
+   Add the new variables and daily cron trigger from `wrangler.example.jsonc`.
+   The Worker requires `ALLOWED_ORIGINS`. Only `/` is approved if `PUBLIC_PATHS`
+   is omitted.
+2. Apply `0002_privacy_events.sql` through Wrangler migrations before deploying
+   the Worker. If your existing table was created manually and migration 0001 is
+   unrecorded, review Wrangler's migration plan: 0001 uses `IF NOT EXISTS` and
+   can run against the existing table. Never run the ALTER statements twice.
+3. Deploy the Worker, then replace the website tracker and script tags promptly.
+   The v2 Worker rejects old payloads; the old tracker must be replaced too.
+4. Clear any website/CDN cache for the tracker and test from a phone and computer.
+   In the browser Network panel, successful POSTs return 204. Repeated updates
+   for one page have the same event ID and produce one D1 row.
+5. Restart the local dashboard. It supports legacy and v2 rows, but legacy elapsed
+   time and v2 active time are different measurements. Compare like-for-like
+   periods when assessing changes after deployment.
+
+The upgrade is additive and does not rewrite historical records. **Old IPs,
+user agents, URLs, cities, and persistent IDs remain in existing rows.** Review
+those separately before deciding to redact or delete them. The new collector
+uses a new expiring browser-ID key and does not reuse old localStorage IDs.
+Unique/returning counts are based on available history; upgrading resets browser
+identity, so comparisons spanning the rollout need care.
+
+Origin checks and payload validation are not bot authentication: non-browser
+clients can forge an Origin and user-agent. Configure Cloudflare request rate
+limits for the public collector to contain write abuse; do not put a shared
+"secret" in browser JavaScript and treat it as access control.
+
+The repository contains examples only. `wrangler.jsonc`, `.env*`, `.dev.vars*`,
+Wrangler state, and editor artifacts are ignored. Do not commit real analytics
+exports, screenshots, credentials, or personal configuration.
+
+## Local dashboard
+
+```bash
+python3 analytics.py
+# or: npm run dashboard
+python3 analytics.py --database DB --port 8765
+python3 analytics.py --port 0       # choose an available port
+python3 analytics.py --no-browser
+```
+
+The script fetches read-only remote D1 aggregates and opens
+http://127.0.0.1:8765. Keep the terminal running; Ctrl+C stops it.
+There are no Python dependencies, frontend build, or external dashboard services.
+Custom SQL views are unnecessary. `d1logs.py` is an optional terminal diagnostic.
+
+Choose 7, 30, or 90 days. Each range is cached for the run; **Refresh data** queries
+D1 again. Dates use UTC, include partial today, and compare with an immediately
+preceding window of equal duration. Empty days mean zero recorded views, not
+verified collection uptime. Rankings show 100 pages/sources and 20
+countries/campaigns; charts show six entries. Headline totals are uncapped.
+
+The dashboard includes traffic, unique browsers, the new/returning split,
+searchable/sortable content performance, acquisition, devices, geography,
+campaigns, security alerts, and a measurement audit. It does not claim verified
+unique people or report visits/bounce rate. It detects the schema and also works
+against the legacy table before migration.
+
+Security alerts include IPs, plus an **IPs to review** table separating possible
+probes from named crawler claims (such as Googlebot), without storing full user
+agents. These names are claims, not verified identities. Top 100 IPs and path/rule/IP groups are displayed.
+These are for investigation, not automatic blocking: shared IPs can include real
+visitors, and crawler claims can include legitimate search indexing. Confirm with
+website/WAF logs before blocking. The local API includes these IPs and must remain
+bound to loopback; never publish analytics snapshots or expose it publicly.
+
+## Suspicious paths and crawler filtering
+
+Security alerts trigger on even one recorded event matching `PROBE_RULES` in
+`analytics.py`. The v2 Worker collapses recognized probe paths to fixed examples
+such as `/.env` or `/app/config/`, without retaining arbitrary submitted paths.
+Alerts show the top 100 path/rule/IP groups across all event types, with an uncapped
+event total. A crawler claim never suppresses a suspicious-path alert.
+
+`crawler_tokens.json` is shared by the Worker and dashboard. Recognized crawler
+claims are retained as `device_type = 'bot'`, with no stored raw UA. The dashboard
+excludes these and suspicious paths from every audience query and comparison,
+while reporting disjoint exclusion counts. Legacy records are classified using
+their stored UAs. This does not block search indexing.
+
+Classification is heuristic. Missing/unknown signals do not prove human traffic;
+Googlebot claims can be spoofed. Browser analytics misses scans that never execute
+the tracker. Use website access/WAF logs with requested paths, status, and actions
+for fuller security coverage. Verified bot signals belong at the website edge,
+not in a trusted browser payload. [Google verification guidance](https://developers.google.com/search/docs/crawling-indexing/googlebot),
+[Cloudflare bot signals](https://developers.cloudflare.com/bots/reference/bot-management-variables/).
+
+Page engagement signals require 20 views and 20 valid paired time/scroll samples.
+Mean maximum scroll below 40% suggests review; at least 70% with 30 seconds suggests
+engagement. These are heuristics, not statistical significance or proof of success.
+Active visible time is an approximation, not proof someone read the page.
+
+For clearer outcomes later, add aggregate counts of explicitly named goals such
+as a successful contact form or download; never collect form contents. Search Console impressions/clicks and aggregate performance/error
+signals can explain traffic and engagement changes without tracking individuals.
+
+## Checks
+
+```bash
+npm test -- --run
+node --test test/tracker.cjs test/dashboard-ui.cjs
+python3 -m unittest discover -s test -p 'test_*.py' -v
+```
+
+Worker tests use only the example configuration and an isolated local D1 database.
+See `migrations/0001_create_analytics.sql` for the legacy-compatible base schema
+and `migrations/0002_privacy_events.sql` for the v2 fields.

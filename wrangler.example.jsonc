@@ -4,8 +4,18 @@
   "main": "src/index.js",
   "compatibility_date": "2025-09-06",
   "observability": { "enabled": false },
+  "triggers": { "crons": ["0 3 * * *"] },
   "vars": {
-    "ALLOWED_ORIGINS": "https://example.com"
+    "ALLOWED_ORIGINS": "https://example.com",
+    "PUBLIC_PATHS": "/,/about,/blog/example-post",
+    "REFERRER_HOSTS": "google.com,www.google.com,bing.com,www.bing.com,duckduckgo.com",
+    "CAMPAIGN_SOURCES": "",
+    "CAMPAIGN_NAMES": "",
+    "RETENTION_DAYS": "90",
+    "IP_RETENTION_DAYS": "7",
+    "TRACK_VISITORS": "true",
+    "LOG_IPS": "true",
+    "COLLECT_COUNTRY": "false"
   },
   "d1_databases": [{
     "binding": "DB",

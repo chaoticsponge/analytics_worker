@@ -14,13 +14,7 @@ import webbrowser
 
 ROOT = Path(__file__).resolve().parent
 DB_NAME = "DB"  # Wrangler D1 binding name
-CRAWLER_TOKENS = (
-    'googlebot', 'google-inspectiontool', 'adsbot-google', 'mediapartners-google',
-    'bingbot', 'bingpreview', 'duckduckbot', 'yandexbot', 'baiduspider',
-    'slurp', 'applebot', 'petalbot', 'bytespider', 'semrushbot', 'ahrefsbot',
-    'mj12bot', 'dotbot', 'gptbot', 'oai-searchbot', 'chatgpt-user', 'claudebot',
-    'perplexitybot', 'facebookexternalhit', 'twitterbot', 'linkedinbot', 'discordbot',
-)
+CRAWLER_TOKENS = json.loads((ROOT / 'crawler_tokens.json').read_text())
 PROBE_RULES = {
     'Sensitive file probe': ('*/.env', '*/.env.*', '*/.env/*', '*/.env~',
                              '*/.git', '*/.git/*', '*/.svn/*', '*/.aws/credentials',
@@ -33,7 +27,7 @@ PROBE_RULES = {
 }
 
 
-def queries(days, now=None):
+def queries(days, now=None, visitor_schema=False):
     now = now or datetime.now(timezone.utc)
     end = int(now.timestamp() * 1000)
     start = int((now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)).timestamp() * 1000)
@@ -51,14 +45,22 @@ def queries(days, now=None):
         "WHEN (" + ' OR '.join(f"normalized_path GLOB '{pattern}'" for pattern in patterns)
         + f") THEN '{reason}'" for reason, patterns in PROBE_RULES.items()
     )
-    crawler = ' OR '.join(f"instr(lower(COALESCE(user_agent, '')), '{token}') > 0" for token in CRAWLER_TOKENS)
+    crawler = "COALESCE(device_type, '') = 'bot' OR " + ' OR '.join(f"instr(lower(COALESCE(user_agent, '')), '{token}') > 0" for token in CRAWLER_TOKENS)
+    crawler_name = "CASE " + ' '.join(
+        f"WHEN instr(lower(COALESCE(user_agent, '')), '{token}') > 0 THEN '{token}'" for token in CRAWLER_TOKENS
+    ) + " ELSE NULL END"
+    if visitor_schema:
+        crawler_name = f"COALESCE(bot_name, {crawler_name})"
+    visitor_key = "'legacy:' || NULLIF(session_id, '')"
+    if visitor_schema:
+        visitor_key = "COALESCE('v2:' || NULLIF(visitor_id, ''), 'legacy:' || NULLIF(session_id, ''))"
     prefix = (
-        f"WITH normalized AS (SELECT *, {decoded} AS normalized_path FROM analytics WHERE ts >= {previous} AND ts < {end}), "
+        f"WITH normalized AS (SELECT *, {decoded} AS normalized_path, {visitor_key} AS visitor_key, {crawler_name} AS crawler_name FROM analytics WHERE ts >= {previous} AND ts < {end}), "
         f"classified AS (SELECT *, CASE {rules} ELSE NULL END AS reason, ({crawler}) AS crawler FROM normalized), "
         "audience AS (SELECT * FROM classified WHERE reason IS NULL AND NOT crawler) "
     )
     statements = {
-        "summary": f"SELECT CASE WHEN ts >= {start} THEN 'current' ELSE 'previous' END AS period, {metrics}, COUNT(DISTINCT NULLIF(session_id, '')) AS browsers, COUNT(DISTINCT NULLIF(country, '')) AS countries, SUM(CASE WHEN duration_ms >= 0 THEN 1 ELSE 0 END) AS duration_samples, SUM(CASE WHEN scroll_pct BETWEEN 0 AND 100 THEN 1 ELSE 0 END) AS scroll_samples, SUM(CASE WHEN NULLIF(session_id, '') IS NOT NULL THEN 1 ELSE 0 END) AS identified, SUM(CASE WHEN NULLIF(utm_source, '') IS NOT NULL THEN 1 ELSE 0 END) AS tagged FROM audience WHERE type = 'page_view' AND ts >= {previous} AND ts < {end} GROUP BY period",
+        "summary": f"SELECT CASE WHEN ts >= {start} THEN 'current' ELSE 'previous' END AS period, {metrics}, COUNT(DISTINCT NULLIF(session_id, '')) AS browsers, COUNT(DISTINCT CASE WHEN {path} != '/[unlisted]' THEN {path} END) AS pages, COUNT(DISTINCT NULLIF(country, '')) AS countries, SUM(CASE WHEN duration_ms >= 0 THEN 1 ELSE 0 END) AS duration_samples, SUM(CASE WHEN scroll_pct BETWEEN 0 AND 100 THEN 1 ELSE 0 END) AS scroll_samples, SUM(CASE WHEN visitor_key IS NOT NULL THEN 1 ELSE 0 END) AS identified, SUM(CASE WHEN NULLIF(utm_source, '') IS NOT NULL THEN 1 ELSE 0 END) AS tagged FROM audience WHERE type = 'page_view' AND ts >= {previous} AND ts < {end} GROUP BY period",
         "daily": f"SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*) AS views FROM audience WHERE {window} GROUP BY day ORDER BY day",
         "pages": f"SELECT {path} AS path, {metrics}, SUM(CASE WHEN duration_ms >= 0 AND scroll_pct BETWEEN 0 AND 100 THEN 1 ELSE 0 END) AS measured FROM audience WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 100",
         "sources": f"SELECT COALESCE(NULLIF(utm_source, ''), NULLIF(referrer, ''), '(direct / unknown)') AS label, {metrics} FROM audience WHERE {window} GROUP BY 1 ORDER BY views DESC LIMIT 100",
@@ -68,9 +70,9 @@ def queries(days, now=None):
     }
     statements = {key: prefix + sql for key, sql in statements.items()}
     statements['alerts'] = prefix + (
-        f"SELECT {path} AS path, reason, COUNT(*) AS events, MAX(ts) AS last_seen "
+        f"SELECT {path} AS path, reason, COALESCE(NULLIF(ip, ''), '(not recorded / expired)') AS ip, COUNT(*) AS events, MAX(ts) AS last_seen "
         f"FROM classified WHERE ts >= {start} AND reason IS NOT NULL "
-        "GROUP BY 1, 2 ORDER BY events DESC, last_seen DESC LIMIT 100"
+        "GROUP BY 1, 2, 3 ORDER BY events DESC, last_seen DESC LIMIT 100"
     )
     statements['traffic_quality'] = prefix + (
         "SELECT COUNT(*) AS recorded, "
@@ -83,11 +85,34 @@ def queries(days, now=None):
         f"SELECT COUNT(*) AS events, COUNT(DISTINCT {path}) AS paths "
         f"FROM classified WHERE ts >= {start} AND reason IS NOT NULL GROUP BY 'current'"
     )
+    history_key = visitor_key.replace('visitor_id', 'a.visitor_id').replace('session_id', 'a.session_id')
+    first_seen = 'a.ts'
+    join = ''
+    if visitor_schema:
+        first_seen = 'COALESCE(v.first_seen, a.ts)'
+        join = 'LEFT JOIN visitors v ON v.visitor_id = a.visitor_id'
+    statements['visitor_summary'] = prefix.rstrip() + (
+        f", history AS (SELECT {history_key} AS visitor_key, MIN({first_seen}) AS first_seen "
+        f"FROM analytics a {join} WHERE a.ts < {end} GROUP BY 1), "
+        f"browser_periods AS (SELECT CASE WHEN ts >= {start} THEN 'current' ELSE 'previous' END AS period, "
+        "audience.visitor_key, MIN(history.first_seen) AS first_seen FROM audience "
+        f"JOIN history ON history.visitor_key = audience.visitor_key WHERE type = 'page_view' "
+        "GROUP BY 1, 2) SELECT period, COUNT(*) AS unique_browsers, "
+        f"SUM(CASE WHEN first_seen >= CASE period WHEN 'current' THEN {start} ELSE {previous} END THEN 1 ELSE 0 END) AS new_browsers, "
+        f"SUM(CASE WHEN first_seen < CASE period WHEN 'current' THEN {start} ELSE {previous} END THEN 1 ELSE 0 END) AS returning_browsers "
+        "FROM browser_periods GROUP BY period"
+    )
+    statements['security_ips'] = prefix + (
+        "SELECT ip, COUNT(*) AS events, "
+        "SUM(CASE WHEN reason IS NOT NULL THEN 1 ELSE 0 END) AS suspicious, "
+        "SUM(CASE WHEN reason IS NULL AND crawler THEN 1 ELSE 0 END) AS crawlers, GROUP_CONCAT(DISTINCT crawler_name) AS crawler_claims, MAX(ts) AS last_seen "
+        f"FROM classified WHERE ts >= {start} AND NULLIF(ip, '') IS NOT NULL AND (reason IS NOT NULL OR crawler) "
+        "GROUP BY ip ORDER BY suspicious DESC, events DESC LIMIT 100"
+    )
     return statements
 
 
-def collect(days, database):
-    statements = queries(days)
+def execute_sql(sql, database):
     wrangler = ROOT / 'node_modules' / '.bin' / 'wrangler'
     executable = shutil.which('wrangler')
     if not executable and os.access(wrangler, os.X_OK):
@@ -95,20 +120,30 @@ def collect(days, database):
     if not executable:
         raise RuntimeError('Wrangler is missing. Run npm install, then wrangler login.')
     try:
-        result = subprocess.run([executable, 'd1', 'execute', database, '--remote', '--command', ';\n'.join(statements.values()) + ';', '--json'], cwd=ROOT, capture_output=True, text=True, timeout=120)
+        result = subprocess.run([executable, 'd1', 'execute', database, '--remote', '--command', sql, '--json'], cwd=ROOT, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError('D1 did not respond within 120 seconds. Check your connection and retry.') from exc
     if result.returncode:
-        raise RuntimeError('D1 query failed. Check the terminal, your Wrangler login, and database name.')
+        raise RuntimeError('D1 query failed. Check your Wrangler login and database configuration.')
     try:
         results = json.loads(result.stdout)
-        if not isinstance(results, list) or len(results) != len(statements):
-            raise ValueError('Unexpected number of query results')
+        if not isinstance(results, list) or not results:
+            raise ValueError('Missing query results')
         if any(item.get('success') is False or not isinstance(item.get('results'), list) for item in results):
             raise ValueError('Unsuccessful query')
-        data = {key: item['results'] for key, item in zip(statements, results)}
     except (ValueError, TypeError, AttributeError) as exc:
         raise RuntimeError('Wrangler returned an unexpected response; update Wrangler and retry.') from exc
+    return results
+
+
+def collect(days, database):
+    columns = execute_sql("SELECT name FROM pragma_table_info('analytics');", database)[0]['results']
+    visitor_schema = any(column['name'] == 'visitor_id' for column in columns)
+    statements = queries(days, visitor_schema=visitor_schema)
+    results = execute_sql(';\n'.join(statements.values()) + ';', database)
+    if len(results) != len(statements):
+        raise RuntimeError('Wrangler returned an unexpected number of query results.')
+    data = {key: item['results'] for key, item in zip(statements, results)}
     return {**data, 'days': days, 'updated': datetime.now(timezone.utc).isoformat(), 'database': database}
 
 

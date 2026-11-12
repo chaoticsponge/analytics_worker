@@ -89,13 +89,16 @@ function renderSecurity() {
   $('security-status').className = `badge ${security.events ? 'danger' : 'neutral'}`;
   $('security-alert').hidden = !security.events;
   $('security-alert').textContent = `${number(security.events)} possible probe events across ${number(security.paths)} paths. Review even a single hit. Verify whether these files exist and whether any response exposed data.`;
-  $('traffic-filter').textContent = `Audience metrics exclude ${number(quality.suspicious)} suspicious pageviews and ${number(quality.crawlers)} other crawler-claimed pageviews from ${number(quality.recorded)} recorded pageviews. ${number(quality.unknown_agent)} remaining pageviews have no user agent; these are not verified human visits.`;
-  $('security-rows').innerHTML = data.alerts.length ? data.alerts.map(row => `<tr><td>${escape(row.path)}</td><td><span class="badge danger">${escape(row.reason)}</span></td><td>${number(row.events)}</td><td>${escape(new Date(row.last_seen).toISOString().replace('T', ' ').slice(0,19))}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">No configured suspicious-path rules matched recorded events in this period. This does not verify site security.</td></tr>';
+  $('traffic-filter').textContent = `Audience metrics exclude ${number(quality.suspicious)} suspicious pageviews and ${number(quality.crawlers)} other crawler-claimed pageviews from ${number(quality.recorded)} recorded pageviews. ${number(quality.unknown_agent)} remaining pageviews have no stored user agent (expected for v2); these are not verified human visits.`;
+  $('security-rows').innerHTML = data.alerts.length ? data.alerts.map(row => `<tr><td>${escape(row.path)}</td><td><span class="badge danger">${escape(row.reason)}</span></td><td>${escape(row.ip || '(not recorded / expired)')}</td><td>${number(row.events)}</td><td>${escape(new Date(row.last_seen).toISOString().replace('T', ' ').slice(0,19))}</td></tr>`).join('') : '<tr><td colspan="5" class="empty">No configured suspicious-path rules matched recorded events in this period. This does not verify site security.</td></tr>';
+  const ips = data.security_ips || [];
+  $('security-ips').innerHTML = ips.length ? ips.map(row => `<tr><td>${escape(row.ip)}</td><td>${number(row.suspicious)}</td><td>${number(row.crawlers)}</td><td>${escape(row.crawler_claims || '(none recorded)')}</td><td>${escape(new Date(row.last_seen).toISOString().replace('T',' ').slice(0,19))}</td></tr>`).join('') : '<tr><td colspan="5" class="empty">No retained IPs for suspicious or crawler traffic in this period.</td></tr>';
 }
 function render() {
-  const current = data.summary.find(s => s.period === 'current') || {views:0,browsers:0,countries:0};
-  const previous = data.summary.find(s => s.period === 'previous') || {};
-  const kpis = [['Audience pageviews','views',number,'Known crawler claims and suspicious paths excluded'],['Recognized browsers','browsers',number,'Distinct stored IDs; not visits or people'],['Average time on page','duration',seconds,'Elapsed time; includes background time'],['Average scroll depth','scroll',percent,'Mean maximum depth; not completion rate']];
+  const visitors = data.visitor_summary || [];
+  const current = {views:0, unique_browsers:0, ...(data.summary.find(s => s.period === 'current') || {}), ...(visitors.find(s => s.period === 'current') || {})};
+  const previous = {...(data.summary.find(s => s.period === 'previous') || {}), ...(visitors.find(s => s.period === 'previous') || {})};
+  const kpis = [['Audience pageviews','views',number,'Known crawler claims and suspicious paths excluded'],['Unique browsers','unique_browsers',number,'Random browser IDs; an estimate, not people'],['Average recorded time','duration',seconds,'v2: active visible time; legacy: elapsed time'],['Average scroll depth','scroll',percent,'Mean maximum depth; not completion rate']];
   $('kpis').innerHTML = kpis.map(([label,key,format,note]) => {
     const before = previous[key], value = current[key];
     const change = before > 0 && value != null ? (value-before)/before*100 : null;
@@ -103,6 +106,12 @@ function render() {
   }).join('');
   $('kpis').setAttribute('aria-busy','false');
   renderSecurity(); renderTrend(); renderPages(); renderInsights(current,previous);
+  renderBars('visitor-mix', [
+    {label:'New browsers', views:current.new_browsers || 0},
+    {label:'Returning browsers', views:current.returning_browsers || 0},
+  ], current.unique_browsers);
+  $('visitor-total').textContent = `${number(current.unique_browsers)} unique browsers`;
+  $('visitor-note').textContent = `New + returning = unique browsers in this period. New means first observed in this window; returning means observed before it. ${number(Math.max(0, current.views - (current.identified || 0)))} audience pageviews have no usable browser ID and are excluded from these counts. Clearing storage, another device, and the v2 upgrade create a new ID.`;
   const sources = new Map();
   data.sources.forEach(row => {
     let label = row.label;

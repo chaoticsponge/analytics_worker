@@ -52,3 +52,25 @@ test('an empty security result does not claim the site is safe', () => {
   assert.match(ui.get('security-rows').innerHTML, /does not verify site security/);
   assert.match(ui.get('kpis').innerHTML, /Audience pageviews/);
 });
+
+test('audience mix shows new and returning as parts of unique browsers', () => {
+  const data = emptyData();
+  data.summary = [{ period: 'current', views: 12, identified: 10 }];
+  data.visitor_summary = [{ period: 'current', unique_browsers: 5, new_browsers: 2, returning_browsers: 3 }];
+  const ui = dashboard(data);
+  assert.equal(ui.get('visitor-total').textContent, '5 unique browsers');
+  assert.match(ui.get('visitor-mix').innerHTML, /New browsers/);
+  assert.match(ui.get('visitor-mix').innerHTML, /Returning browsers/);
+  assert.match(ui.get('visitor-mix').innerHTML, /40%/);
+  assert.match(ui.get('visitor-mix').innerHTML, /60%/);
+  assert.match(ui.get('visitor-note').textContent, /2 audience pageviews have no usable browser ID/);
+  assert.match(ui.get('kpis').innerHTML, /Unique browsers/);
+});
+
+test('security IPs are rendered as escaped text', () => {
+  const data = emptyData();
+  data.security_ips = [{ ip:'192.0.2.1<script>', suspicious:1, crawlers:0, last_seen:1794484800000 }];
+  const ui = dashboard(data);
+  assert.match(ui.get('security-ips').innerHTML, /192\.0\.2\.1&lt;script&gt;/);
+  assert.doesNotMatch(ui.get('security-ips').innerHTML, /<script>/);
+});

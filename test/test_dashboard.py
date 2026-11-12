@@ -113,6 +113,42 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result['alerts'][0]['path'], '/.env.bak')
         self.assertEqual(result['security_summary'][0]['events'], 1)
 
+    def test_new_and_returning_are_disjoint_unique_browsers(self):
+        previous = int(datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        current = int(datetime(2026, 11, 12, tzinfo=timezone.utc).timestamp() * 1000)
+        self.db.execute('INSERT INTO analytics (ts,type,path,session_id) VALUES (?,?,?,?)',
+                        (previous, 'page_view', '/post', 'same'))
+        for _ in range(2):
+            self.db.execute('INSERT INTO analytics (ts,type,path,session_id) VALUES (?,?,?,?)',
+                            (current, 'page_view', '/post', 'new-browser'))
+        summary = next(row for row in self.results()['visitor_summary'] if row['period'] == 'current')
+        self.assertEqual(summary, {'period': 'current', 'unique_browsers': 2,
+                                  'new_browsers': 1, 'returning_browsers': 1})
+
+    def test_v2_history_retains_first_seen_and_filters_bot_flags_without_raw_ua(self):
+        self.db.executescript((ROOT / 'migrations/0002_privacy_events.sql').read_text())
+        previous = int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        current = int(datetime(2026, 11, 12, tzinfo=timezone.utc).timestamp() * 1000)
+        self.db.execute('INSERT INTO visitors VALUES (?,?,?)', ('returning-browser', previous, current))
+        for kind, visitor, ip in [('desktop', 'returning-browser', None), ('bot', 'bot-id', '192.0.2.1')]:
+            self.db.execute('INSERT INTO analytics (ts,type,path,visitor_id,device_type,ip) VALUES (?,?,?,?,?,?)',
+                            (current, 'page_view', '/post', visitor, kind, ip))
+        result = {key: [dict(row) for row in self.db.execute(sql)]
+                  for key, sql in analytics.queries(7, self.now, visitor_schema=True).items()}
+        summary = next(row for row in result['visitor_summary'] if row['period'] == 'current')
+        self.assertEqual(summary, {'period': 'current', 'unique_browsers': 2,
+                                  'new_browsers': 1, 'returning_browsers': 1})
+        self.assertEqual(result['security_ips'][0]['ip'], '192.0.2.1')
+        self.assertEqual(result['security_ips'][0]['crawlers'], 1)
+
+    def test_alerts_keep_separate_ips_for_the_same_path(self):
+        for ip in ['192.0.2.1', '192.0.2.2']:
+            self.add_event('/.env')
+            self.db.execute('UPDATE analytics SET ip = ? WHERE id = last_insert_rowid()', (ip,))
+        alerts = self.results()['alerts']
+        self.assertEqual({row['ip'] for row in alerts}, {'192.0.2.1', '192.0.2.2'})
+        self.assertTrue(all(row['events'] == 1 for row in alerts))
+
 
 class HttpTests(unittest.TestCase):
     def setUp(self):
